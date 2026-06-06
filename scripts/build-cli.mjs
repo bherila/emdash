@@ -18,9 +18,24 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
+import fs from 'node:fs/promises';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const r = (p) => path.join(root, p);
+
+const rawImportPlugin = {
+  name: 'raw-import',
+  setup(build) {
+    build.onResolve({ filter: /\?raw$/ }, (args) => ({
+      path: path.resolve(args.resolveDir, args.path.replace(/\?raw$/, '')),
+      namespace: 'raw-import',
+    }));
+    build.onLoad({ filter: /.*/, namespace: 'raw-import' }, async (args) => ({
+      contents: `export default ${JSON.stringify(await fs.readFile(args.path, 'utf8'))};`,
+      loader: 'js',
+    }));
+  },
+};
 
 await build({
   entryPoints: [r('src/main/cli/index.ts')],
@@ -45,5 +60,6 @@ await build({
     '@root': root,
     '@tooling': r('tooling'),
   },
+  plugins: [rawImportPlugin],
   logLevel: 'info',
 });

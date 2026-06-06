@@ -22,6 +22,12 @@ import { db } from '@main/db/client';
 import { dispatchAgent } from './agent-dispatch';
 import { getBool, getString, parseArgs, type ParsedArgs } from './args';
 import {
+  addSshProject,
+  listSshConnections,
+  listSshProjects,
+  upsertSshConnection,
+} from './remote-project-commands';
+import {
   createWorkspace,
   listWorkspaces,
   removeWorkspace,
@@ -42,6 +48,12 @@ Usage:
                           [--pre-remove <cmd>] [--skip-hook] [--force] [--json]
   emdash workspace send   --project <p> (--branch <b> | --id <workspaceId>)
                           --message "<text>" [--json]
+  emdash ssh list [--json]
+  emdash ssh upsert --id <id> --name <name> --host <host> --user <user>
+                    [--port 22] [--key <path>] [--alias <ssh-config-host>] [--json]
+  emdash project list-ssh [--json]
+  emdash project add-ssh --name <name> --path <remote-path> --connection <ssh-id>
+                         [--id <id>] [--base <branch>] [--json]
 
 Options:
   -p, --project   Project name or id
@@ -60,7 +72,36 @@ Options:
       --force     Remove even if the pre-remove hook fails
       --json      Machine-readable JSON output
       --include-archived  Include archived workspaces in the list
+      --host      SSH hostname
+      --user      SSH username
+      --key       SSH private key path for key auth
+      --alias     SSH config host alias
+      --connection SSH connection id for remote projects
+      --path      Remote repository path
 `;
+
+function requireString(args: ParsedArgs, key: string): string {
+  const value = getString(args, key);
+  if (!value) throw new Error(`--${key} <value> is required.`);
+  return value;
+}
+
+function renderRows(rows: Array<Record<string, unknown>>, columns: string[]): void {
+  if (rows.length === 0) {
+    process.stdout.write('No rows found.\n');
+    return;
+  }
+  const widths = Object.fromEntries(
+    columns.map((col) => [
+      col,
+      Math.max(col.length, ...rows.map((row) => String(row[col] ?? '').length)),
+    ])
+  ) as Record<string, number>;
+  const line = (row: Record<string, unknown>) =>
+    columns.map((col) => String(row[col] ?? '').padEnd(widths[col]!)).join('  ');
+  process.stdout.write(`${line(Object.fromEntries(columns.map((col) => [col, col])))}\n`);
+  for (const row of rows) process.stdout.write(`${line(row)}\n`);
+}
 
 async function runList(args: ParsedArgs): Promise<void> {
   const items = await listWorkspaces(db, {
@@ -104,6 +145,96 @@ async function runList(args: ParsedArgs): Promise<void> {
   process.stdout.write(`${line(Object.fromEntries(columns.map((c) => [c, c])))}\n`);
   for (const row of rows) {
     process.stdout.write(`${line(row as Record<string, string>)}\n`);
+  }
+}
+
+async function runSsh(args: ParsedArgs, command: string | undefined): Promise<void> {
+  switch (command) {
+    case 'list': {
+      const rows = await listSshConnections(db);
+      const output = rows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        host: row.host,
+        port: row.port,
+        username: row.username,
+        authType: row.authType,
+        privateKeyPath: row.privateKeyPath,
+      }));
+      if (getBool(args, 'json')) {
+        process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
+      } else {
+        renderRows(output, ['id', 'name', 'host', 'port', 'username', 'authType', 'privateKeyPath']);
+      }
+      return;
+    }
+    case 'upsert': {
+      const row = await upsertSshConnection(db, {
+        id: getString(args, 'id'),
+        name: requireString(args, 'name'),
+        host: requireString(args, 'host'),
+        port: Number(getString(args, 'port') ?? '22'),
+        username: getString(args, 'user') ?? requireString(args, 'username'),
+        privateKeyPath: getString(args, 'key'),
+        sshConfigAlias: getString(args, 'alias'),
+        useAgent: getBool(args, 'use-agent'),
+      });
+      if (getBool(args, 'json')) {
+        process.stdout.write(`${JSON.stringify(row, null, 2)}\n`);
+      } else {
+        process.stdout.write(`Saved SSH connection ${row.id}\n`);
+      }
+      return;
+    }
+    default:
+      throw new Error(`Unknown ssh command: ${command ?? '(none)'}`);
+  }
+}
+
+async function runProject(args: ParsedArgs, command: string | undefined): Promise<void> {
+  switch (command) {
+    case 'list-ssh': {
+      const rows = await listSshProjects(db);
+      const output = rows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        path: row.path,
+        baseRef: row.baseRef,
+        sshConnectionId: row.sshConnectionId,
+      }));
+      if (getBool(args, 'json')) {
+        process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
+      } else {
+        renderRows(output, ['id', 'name', 'path', 'baseRef', 'sshConnectionId']);
+      }
+      return;
+    }
+    case 'add-ssh': {
+      const project = await addSshProject(db, {
+        id: getString(args, 'id'),
+        name: requireString(args, 'name'),
+        path: requireString(args, 'path'),
+        connectionId: requireString(args, 'connection'),
+        baseRef: getString(args, 'base'),
+        settings: {
+          defaultBranch: getString(args, 'base') ?? 'main',
+          baseRemote: 'origin',
+          pushRemote: 'origin',
+          tmux: true,
+        },
+        shareableSettings: {
+          shellSetup: '. "$HOME/.bash_profile"',
+        },
+      });
+      if (getBool(args, 'json')) {
+        process.stdout.write(`${JSON.stringify(project, null, 2)}\n`);
+      } else {
+        process.stdout.write(`Saved SSH project ${project.name} (${project.id})\n`);
+      }
+      return;
+    }
+    default:
+      throw new Error(`Unknown project command: ${command ?? '(none)'}`);
   }
 }
 
@@ -291,25 +422,31 @@ export async function main(argv: string[]): Promise<number> {
     return 0;
   }
 
-  if (group !== 'workspace') {
-    process.stderr.write(`Unknown command group: ${group}\n\n${USAGE}`);
-    return 1;
-  }
-
   try {
-    switch (command) {
-      case 'list':
-        await runList(args);
+    switch (group) {
+      case 'workspace':
+        switch (command) {
+          case 'list':
+            await runList(args);
+            return 0;
+          case 'create':
+            return await runCreate(args);
+          case 'remove':
+            await runRemove(args);
+            return 0;
+          case 'send':
+            return await runSend(args);
+          default:
+            throw new Error(`Unknown workspace command: ${command ?? '(none)'}`);
+        }
+      case 'ssh':
+        await runSsh(args, command);
         return 0;
-      case 'create':
-        return await runCreate(args);
-      case 'remove':
-        await runRemove(args);
+      case 'project':
+        await runProject(args, command);
         return 0;
-      case 'send':
-        return await runSend(args);
       default:
-        process.stderr.write(`Unknown workspace command: ${command ?? '(none)'}\n\n${USAGE}`);
+        process.stderr.write(`Unknown command group: ${group}\n\n${USAGE}`);
         return 1;
     }
   } catch (error) {

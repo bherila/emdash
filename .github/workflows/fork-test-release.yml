@@ -1,0 +1,64 @@
+name: Fork Test Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to create or replace'
+        required: false
+        default: 'bwh-cli-ssh-test'
+      arch:
+        description: 'macOS architecture to build (arm64 or x64)'
+        required: false
+        default: 'arm64'
+
+permissions:
+  contents: write
+
+jobs:
+  mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-build
+        with:
+          build-variant: canary
+
+      - name: Build app and CLI
+        run: |
+          pnpm run build
+          pnpm run build:cli
+
+      - name: Rebuild native modules for Electron
+        run: node --experimental-strip-types scripts/release/rebuild-native.ts --arch "${{ inputs.arch }}"
+
+      - name: Build unsigned macOS artifacts
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: >
+          pnpm exec electron-builder
+          --mac dmg zip
+          --${{ inputs.arch }}
+          --publish never
+          --config electron-builder.canary.config.ts
+          --config.npmRebuild=false
+          --config.mac.identity=null
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release delete "$TAG" --cleanup-tag -y 2>/dev/null || true
+          mapfile -t assets < <(find release -maxdepth 1 -type f | sort)
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "No release assets found" >&2
+            exit 1
+          fi
+          gh release create "$TAG" "${assets[@]}" \
+            --target "$GITHUB_SHA" \
+            --title "BWH CLI SSH test build ($TAG)" \
+            --notes "Unsigned macOS test build from $GITHUB_SHA. Includes PR 2321 workspace CLI plus bherila SSH project registration commands." \
+            --prerelease

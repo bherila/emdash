@@ -20,6 +20,7 @@ const BOOLEAN_FLAGS = new Set([
   'checkout-existing',
   'auto-approve',
   'push-branch',
+  'use-agent',
   'force',
   'skip-hook',
   'help',
@@ -36,6 +37,15 @@ const VALUE_FLAGS = new Set([
   'id',
   'pre-remove',
   'prompt',
+  'conversation',
+  'host',
+  'port',
+  'user',
+  'username',
+  'key',
+  'alias',
+  'connection',
+  'path',
 ]);
 
 const SHORT_ALIASES: Record<string, string> = {

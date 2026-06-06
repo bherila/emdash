@@ -20,7 +20,7 @@ const config: Configuration = {
     },
   ],
   generateUpdatesFilesForAllChannels: false,
-  files: ['out/**/*', 'node_modules/**/*', 'drizzle/**/*'],
+  files: ['out/**/*', 'bin/emdash-cli.mjs', 'node_modules/**/*', 'drizzle/**/*'],
   asarUnpack: [
     'node_modules/better-sqlite3/**',
     'node_modules/node-pty/**',

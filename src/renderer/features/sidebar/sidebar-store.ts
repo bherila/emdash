@@ -17,7 +17,13 @@ function parseSidebarTaskSortBy(value: unknown): SidebarTaskSortBy | undefined {
   return value === 'created-at' || value === 'updated-at' ? value : undefined;
 }
 
-export function getSortInstant(task: TaskStore, kind: 'created' | 'updated'): string {
+export type TaskSortKind = 'created' | 'updated';
+
+export function sortKindFor(sortBy: SidebarTaskSortBy): TaskSortKind {
+  return sortBy === 'created-at' ? 'created' : 'updated';
+}
+
+export function getSortInstant(task: TaskStore, kind: TaskSortKind): string | undefined {
   const reg = registeredTaskData(task);
   if (reg) {
     if (kind === 'created') return reg.createdAt;
@@ -28,7 +34,7 @@ export function getSortInstant(task: TaskStore, kind: 'created' | 'updated'): st
     if (kind === 'created') return u.createdAt;
     return u.lastInteractedAt;
   }
-  return '';
+  return undefined;
 }
 
 export type SidebarRow =
@@ -101,7 +107,9 @@ export class SidebarStore implements Snapshottable<SidebarSnapshot> {
       rows.push({ kind: 'project', projectId });
       if (this.expandedProjectIds.has(projectId) && project.mountedProject) {
         const tasks = Array.from(project.mountedProject.taskManager.tasks.values()).filter(
-          (t) => t.state === 'unregistered' || !('archivedAt' in t.data && t.data.archivedAt)
+          (t) =>
+            t.data.type !== 'automation-run' &&
+            (t.state === 'unregistered' || !('archivedAt' in t.data && t.data.archivedAt))
         );
         const manualOrder = this.taskOrderByProject[projectId];
         const ordered = manualOrder?.length
@@ -136,14 +144,15 @@ export class SidebarStore implements Snapshottable<SidebarSnapshot> {
 
   /**
    * Visible unpinned task IDs for a project in sidebar order. Archived tasks are
-   * excluded. Independent of expand state so Next/Previous Task navigation works
-   * even when the project is collapsed.
+   * and automation tasks are excluded. Independent of expand state so Next/Previous
+   * Task navigation works even when the project is collapsed.
    */
   visibleTaskIdsForProject(projectId: string): string[] {
     const project = this.projectManager.projects.get(projectId);
     if (!project?.mountedProject) return [];
     const tasks = Array.from(project.mountedProject.taskManager.tasks.values()).filter(
       (t) =>
+        t.data.type !== 'automation-run' &&
         !t.data.isPinned &&
         (t.state === 'unregistered' || !('archivedAt' in t.data && t.data.archivedAt))
     );
@@ -242,9 +251,9 @@ export class SidebarStore implements Snapshottable<SidebarSnapshot> {
   }
 
   private compareSidebarTasks(a: TaskStore, b: TaskStore): number {
-    const kind: 'created' | 'updated' = this.taskSortBy === 'created-at' ? 'created' : 'updated';
-    const ia = getSortInstant(a, kind);
-    const ib = getSortInstant(b, kind);
+    const kind = sortKindFor(this.taskSortBy);
+    const ia = getSortInstant(a, kind) ?? '';
+    const ib = getSortInstant(b, kind) ?? '';
     const d = ib.localeCompare(ia);
     if (d !== 0) return d;
     return a.data.id.localeCompare(b.data.id);

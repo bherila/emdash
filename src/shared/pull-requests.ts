@@ -11,6 +11,14 @@ export type MergeStateStatus =
   | 'UNSTABLE'
   | 'UNKNOWN';
 
+export type PullRequestMergeStrategy = 'merge' | 'squash' | 'rebase';
+
+export type PullRequestMergeOptions = {
+  strategy: PullRequestMergeStrategy;
+  commitHeadOid?: string;
+  bypassRequirements?: boolean;
+};
+
 export type PullRequestUser = {
   userId: string;
   userName: string;
@@ -169,7 +177,7 @@ export function pullRequestErrorMessage(error: PullRequestError): string {
     case 'cross_host_pr':
       return `Cannot create a pull request across different GitHub hosts (${error.headHost} -> ${error.baseHost}). Push and base remotes must use the same GitHub or GitHub Enterprise host.`;
     case 'host_unreachable':
-      return `Unable to reach GitHub Enterprise host ${error.host}: ${error.reason}`;
+      return `Unable to reach GitHub host ${error.host}: ${error.reason}`;
     default:
       return error.message;
   }

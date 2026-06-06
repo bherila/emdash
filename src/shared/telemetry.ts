@@ -1,10 +1,19 @@
 import type { AgentProviderId } from '@shared/agent-provider-registry';
 import type { OpenInAppId } from '@shared/openInApps';
+import type { PullRequestMergeStrategy } from '@shared/pull-requests';
 import type { TaskLifecycleStatus } from '@shared/tasks';
 
 type EmptyProps = Record<string, never>;
 
-export type FocusView = 'home' | 'project' | 'task' | 'settings' | 'library' | 'skills' | 'mcp';
+export type FocusView =
+  | 'home'
+  | 'project'
+  | 'task'
+  | 'settings'
+  | 'library'
+  | 'skills'
+  | 'mcp'
+  | 'automations';
 export type FocusMainPanel = 'agents' | 'editor' | 'diff';
 export type FocusedRegion = 'main' | 'bottom';
 
@@ -47,6 +56,7 @@ export type TelemetryEventProperties = {
   library_viewed: { from_view: FocusView | null };
   skills_viewed: { from_view: FocusView | null };
   mcp_viewed: { from_view: FocusView | null };
+  automations_viewed: { from_view: FocusView | null };
 
   project_added: { type: 'local' | 'ssh'; strategy: 'open' | 'create' | 'clone'; success: boolean };
   project_deleted: EmptyProps;
@@ -81,7 +91,8 @@ export type TelemetryEventProperties = {
   pr_created: { is_draft: boolean };
   pr_creation_failed: { error_type: string };
   pr_merged: {
-    strategy: 'merge' | 'squash' | 'rebase';
+    strategy: PullRequestMergeStrategy;
+    bypass_requirements: boolean;
     success: boolean;
     error_type?: string;
   };

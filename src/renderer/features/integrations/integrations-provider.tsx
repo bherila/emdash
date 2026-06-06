@@ -41,6 +41,24 @@ function validateInstanceCredentials(input: { instanceUrl: string; token: string
   return null;
 }
 
+function validateMondayCredentials(input: { token: string; boardUrls: string }): string | null {
+  if (!input.token?.trim()) {
+    return 'API token is required.';
+  }
+  return null;
+}
+
+function validateTrelloCredentials(input: {
+  apiKey: string;
+  token: string;
+  boardUrls: string;
+}): string | null {
+  if (!input.apiKey?.trim() || !input.token?.trim()) {
+    return 'API key and token are required.';
+  }
+  return null;
+}
+
 const PROVIDER_CONNECTION_CONFIG = {
   linear: {
     connectMutationFn: (apiKey: string) => rpc.linear.saveToken(apiKey),
@@ -87,6 +105,20 @@ const PROVIDER_CONNECTION_CONFIG = {
     fallbackError: DEFAULT_CONNECT_ERROR,
     validateInput: validateTokenInput,
   },
+  monday: {
+    connectMutationFn: (credentials: { token: string; boardUrls: string }) =>
+      rpc.monday.saveCredentials(credentials),
+    disconnectMutationFn: () => rpc.monday.clearCredentials(),
+    fallbackError: DEFAULT_CONNECT_ERROR,
+    validateInput: validateMondayCredentials,
+  },
+  trello: {
+    connectMutationFn: (credentials: { apiKey: string; token: string; boardUrls: string }) =>
+      rpc.trello.saveCredentials(credentials),
+    disconnectMutationFn: () => rpc.trello.clearCredentials(),
+    fallbackError: DEFAULT_CONNECT_ERROR,
+    validateInput: validateTrelloCredentials,
+  },
 } as const;
 
 type IntegrationsContextValue = {
@@ -101,6 +133,8 @@ type IntegrationsContextValue = {
   isForgejoConnected: boolean | null;
   isFeaturebaseConnected: boolean | null;
   isAsanaConnected: boolean | null;
+  isMondayConnected: boolean | null;
+  isTrelloConnected: boolean | null;
 
   // Auth mutations stay per provider.
   isLinearLoading: boolean;
@@ -110,6 +144,8 @@ type IntegrationsContextValue = {
   isForgejoLoading: boolean;
   isFeaturebaseLoading: boolean;
   isAsanaLoading: boolean;
+  isMondayLoading: boolean;
+  isTrelloLoading: boolean;
   connectLinear: (apiKey: string) => Promise<void>;
   disconnectLinear: () => Promise<void>;
   connectJira: (credentials: { siteUrl: string; email: string; token: string }) => Promise<void>;
@@ -124,6 +160,14 @@ type IntegrationsContextValue = {
   disconnectFeaturebase: () => Promise<void>;
   connectAsana: (apiKey: string) => Promise<void>;
   disconnectAsana: () => Promise<void>;
+  connectMonday: (credentials: { token: string; boardUrls: string }) => Promise<void>;
+  disconnectMonday: () => Promise<void>;
+  connectTrello: (credentials: {
+    apiKey: string;
+    token: string;
+    boardUrls: string;
+  }) => Promise<void>;
+  disconnectTrello: () => Promise<void>;
 };
 
 const IntegrationsContext = createContext<IntegrationsContextValue | null>(null);
@@ -185,6 +229,14 @@ export function IntegrationsProvider({ children }: { children: React.ReactNode }
     ...PROVIDER_CONNECTION_CONFIG.asana,
     invalidate: invalidateStatuses,
   });
+  const mondayConnection = useProviderConnection({
+    ...PROVIDER_CONNECTION_CONFIG.monday,
+    invalidate: invalidateStatuses,
+  });
+  const trelloConnection = useProviderConnection({
+    ...PROVIDER_CONNECTION_CONFIG.trello,
+    invalidate: invalidateStatuses,
+  });
 
   const connectionStatus = statusData ?? DEFAULT_CONNECTION_STATUS;
 
@@ -200,6 +252,8 @@ export function IntegrationsProvider({ children }: { children: React.ReactNode }
         isForgejoConnected: isConnected(statusData, 'forgejo'),
         isFeaturebaseConnected: isConnected(statusData, 'featurebase'),
         isAsanaConnected: isConnected(statusData, 'asana'),
+        isMondayConnected: isConnected(statusData, 'monday'),
+        isTrelloConnected: isConnected(statusData, 'trello'),
         isLinearLoading: isInitialConnectionCheck || linearConnection.isLoading,
         isJiraLoading: isInitialConnectionCheck || jiraConnection.isLoading,
         isGitlabLoading: isInitialConnectionCheck || gitlabConnection.isLoading,
@@ -207,6 +261,8 @@ export function IntegrationsProvider({ children }: { children: React.ReactNode }
         isForgejoLoading: isInitialConnectionCheck || forgejoConnection.isLoading,
         isFeaturebaseLoading: isInitialConnectionCheck || featurebaseConnection.isLoading,
         isAsanaLoading: isInitialConnectionCheck || asanaConnection.isLoading,
+        isMondayLoading: isInitialConnectionCheck || mondayConnection.isLoading,
+        isTrelloLoading: isInitialConnectionCheck || trelloConnection.isLoading,
         connectLinear: linearConnection.connect,
         disconnectLinear: linearConnection.disconnect,
         connectJira: jiraConnection.connect,
@@ -221,6 +277,10 @@ export function IntegrationsProvider({ children }: { children: React.ReactNode }
         disconnectFeaturebase: featurebaseConnection.disconnect,
         connectAsana: asanaConnection.connect,
         disconnectAsana: asanaConnection.disconnect,
+        connectMonday: mondayConnection.connect,
+        disconnectMonday: mondayConnection.disconnect,
+        connectTrello: trelloConnection.connect,
+        disconnectTrello: trelloConnection.disconnect,
       }}
     >
       {children}

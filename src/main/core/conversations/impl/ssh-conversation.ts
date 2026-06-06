@@ -1,5 +1,5 @@
 import { wireAgentClassifier } from '@main/core/agent-hooks/classifier-wiring';
-import { claudeTrustService } from '@main/core/agent-hooks/claude-trust-service';
+import { workspaceTrustService } from '@main/core/agent-hooks/workspace-trust-service';
 import { ConversationSessionSupervisor } from '@main/core/conversations/conversation-session-supervisor';
 import { resolveAgentSessionCommandArgs } from '@main/core/conversations/resolve-agent-session-command';
 import type { ConversationProvider } from '@main/core/conversations/types';
@@ -20,6 +20,7 @@ import type { Conversation } from '@shared/conversations';
 import { agentSessionExitedChannel } from '@shared/events/agentEvents';
 import { makePtySessionId } from '@shared/ptySessionId';
 import { buildAgentSessionCommand } from './agent-command';
+import { createInitialPromptDelivery } from './initial-prompt-delivery';
 import { scheduleInitialPromptInjection } from './keystroke-injection';
 import { resolveProviderEnv } from './provider-env';
 
@@ -99,29 +100,41 @@ export class SshConversationProvider implements ConversationProvider {
     this.knownSessionIds.add(sessionId);
 
     const spawnSize = ptySessionRegistry.getLastSize(sessionId) ?? initialSize;
-    const spawnToken = this.supervisor.beginStart(sessionId, { requireDesired });
+    const spawnToken = this.supervisor.beginStart(sessionId, {
+      requireDesired,
+      mode: isResuming ? 'resume' : 'fresh',
+    });
     if (!spawnToken) return;
 
     try {
-      await claudeTrustService.maybeAutoTrustSsh({
+      await workspaceTrustService.maybeAutoTrustSsh({
         providerId: conversation.providerId,
         cwd: this.taskPath,
         ctx: this.ctx,
         remoteFs: new SshFileSystem(this.proxy, '/'),
+        force: conversation.autoApprove === true,
       });
 
       const providerConfig = await providerOverrideSettings.getItem(conversation.providerId);
       const agentSession = resolveAgentSessionCommandArgs(conversation, isResuming, {
         requireProviderSessionId: false,
       });
+      const initialPromptDelivery = createInitialPromptDelivery({
+        providerId: conversation.providerId,
+        conversationId: conversation.id,
+        providerConfig,
+        initialPrompt,
+        isResuming: agentSession.isResuming,
+      });
       const { command, args } = buildAgentSessionCommand({
         providerId: conversation.providerId,
         providerConfig,
         autoApprove: conversation.autoApprove,
+        extraInitialArgs: initialPromptDelivery.argvAddition(),
+        initialPrompt,
         sessionId: agentSession.sessionId,
         providerSessionId: conversation.providerSessionId,
         isResuming: agentSession.isResuming,
-        initialPrompt,
       });
       const providerEnv = resolveProviderEnv(providerConfig, {
         providerId: conversation.providerId,
@@ -208,8 +221,17 @@ export class SshConversationProvider implements ConversationProvider {
             conversation,
             sessionId,
             initialSize: replacementSize,
-            isResuming,
+            isResuming: decision.kind === 'respawnResume',
             initialPrompt,
+          });
+          return;
+        }
+
+        if (options.shellRefreshRetried && exitCode === 127) {
+          this.supervisor.stop(sessionId);
+          events.emit(agentSessionExitedChannel, {
+            conversationId: conversation.id,
+            taskId: conversation.taskId,
           });
           return;
         }
@@ -223,6 +245,7 @@ export class SshConversationProvider implements ConversationProvider {
           this.scheduleReplacement({
             conversation,
             initialSize: replacementSize,
+            isResuming: decision.kind === 'respawnResume',
           });
         }
       });
@@ -373,12 +396,14 @@ export class SshConversationProvider implements ConversationProvider {
   private scheduleReplacement({
     conversation,
     initialSize,
+    isResuming,
   }: {
     conversation: Conversation;
     initialSize: { cols: number; rows: number };
+    isResuming: boolean;
   }): void {
     setTimeout(() => {
-      this.startSessionInternal(conversation, initialSize, true, undefined, true, {
+      this.startSessionInternal(conversation, initialSize, isResuming, undefined, true, {
         shellRefreshRetried: false,
       }).catch((e) => {
         log.error('SshConversationProvider: replacement failed', {

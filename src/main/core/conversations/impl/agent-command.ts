@@ -1,6 +1,11 @@
 import { quoteShellArg } from '@main/utils/shellEscape';
-import { getProvider, type AgentProviderId } from '@shared/agent-provider-registry';
+import {
+  getProvider,
+  isValidProviderSessionId,
+  type AgentProviderId,
+} from '@shared/agent-provider-registry';
 import type { ProviderCustomConfig } from '@shared/app-settings';
+import { addKimiHooksToConfigText } from '../../agent-hooks/hook-config';
 
 export type AgentCommand = {
   command: string;
@@ -71,7 +76,7 @@ export function parseShellWords(
   return { ok: true, words };
 }
 
-function parseArgField(value: string | undefined): string[] {
+export function parseArgField(value: string | undefined): string[] {
   if (!value) return [];
   const parsed = parseShellWords(value);
   if (!parsed.ok) throw new Error(parsed.reason);
@@ -103,10 +108,40 @@ function appendSessionId(args: string[], flag: string, sessionId: string): void 
   args.push(...parts, sessionId);
 }
 
+function dedupeSingletonArgs(args: string[], singletonArgs: readonly string[]): string[] {
+  const singletons = new Set(singletonArgs);
+  const seen = new Set<string>();
+  return args.filter((arg) => {
+    if (!singletons.has(arg)) return true;
+    if (seen.has(arg)) return false;
+    seen.add(arg);
+    return true;
+  });
+}
+
+function injectKimiHooksIntoInlineConfig(args: string[]): string[] {
+  return args.map((arg, index) => {
+    if (arg === '--config' && args[index + 1] !== undefined) {
+      return arg;
+    }
+
+    if (index > 0 && args[index - 1] === '--config') {
+      return addKimiHooksToConfigText(arg);
+    }
+
+    if (arg.startsWith('--config=')) {
+      return `--config=${addKimiHooksToConfigText(arg.slice('--config='.length))}`;
+    }
+
+    return arg;
+  });
+}
+
 export function buildAgentCommand({
   providerId,
   providerConfig,
   autoApprove,
+  extraInitialArgs,
   initialPrompt,
   sessionId,
   providerSessionId,
@@ -115,6 +150,7 @@ export function buildAgentCommand({
   providerId: AgentProviderId;
   providerConfig: ProviderCustomConfig | undefined;
   autoApprove?: boolean;
+  extraInitialArgs?: readonly string[];
   initialPrompt?: string;
   sessionId: string;
   providerSessionId?: string;
@@ -130,9 +166,14 @@ export function buildAgentCommand({
   const shouldPassSessionId =
     sessionIdFlag !== undefined && (!providerConfig?.sessionIdOnResumeOnly || isResuming);
 
+  const validProviderSessionId =
+    providerSessionId && isValidProviderSessionId(providerId, providerSessionId)
+      ? providerSessionId
+      : undefined;
+
   if (isResuming && providerConfig?.resumeFlag) {
-    if (providerConfig.sessionIdFlag && providerSessionId) {
-      appendSessionId(args, providerConfig.resumeFlag, providerSessionId);
+    if (providerConfig.sessionIdFlag && validProviderSessionId) {
+      appendSessionId(args, providerConfig.resumeFlag, validProviderSessionId);
     } else if (providerConfig.sessionIdFlag && !providerConfig.sessionIdOnResumeOnly) {
       appendSessionId(args, providerConfig.resumeFlag, sessionId);
     } else if (providerConfig.resumeWithoutSessionFlag) {
@@ -146,11 +187,20 @@ export function buildAgentCommand({
     args.push(providerDef.newConversationFlag);
   }
 
-  if (autoApprove && providerConfig?.autoApproveFlag) {
-    args.push(...parseArgField(providerConfig.autoApproveFlag));
+  const autoApproveFlag = providerConfig?.autoApproveFlag;
+  const shouldAppendAutoApproveFlag =
+    autoApprove &&
+    autoApproveFlag &&
+    // Kimi preserves approval settings on resume and rejects --yolo with --continue/--session.
+    !(providerId === 'kimi' && isResuming);
+
+  if (shouldAppendAutoApproveFlag) {
+    args.push(...parseArgField(autoApproveFlag));
   }
 
-  if (
+  if (!isResuming && extraInitialArgs?.length) {
+    args.push(...extraInitialArgs);
+  } else if (
     !isResuming &&
     initialPrompt &&
     !providerDef?.useKeystrokeInjection &&
@@ -161,7 +211,15 @@ export function buildAgentCommand({
 
   args.push(...parseArgField(providerConfig?.extraArgs));
 
-  return { command, args };
+  const finalArgs =
+    providerId === 'codex'
+      ? dedupeSingletonArgs(args, ['--dangerously-bypass-approvals-and-sandbox'])
+      : args;
+
+  return {
+    command,
+    args: providerId === 'kimi' ? injectKimiHooksIntoInlineConfig(finalArgs) : finalArgs,
+  };
 }
 
 export function wrapAgentCommandWithStdinPipe(agent: AgentCommand, prompt: string): AgentCommand {
@@ -174,6 +232,7 @@ export function buildAgentSessionCommand(args: {
   providerId: AgentProviderId;
   providerConfig: ProviderCustomConfig | undefined;
   autoApprove?: boolean;
+  extraInitialArgs?: readonly string[];
   initialPrompt?: string;
   sessionId: string;
   providerSessionId?: string;

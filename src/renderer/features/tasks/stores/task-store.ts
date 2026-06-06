@@ -7,7 +7,6 @@ import { err, type Result } from '@shared/result';
 import type {
   Issue,
   RenameTaskError,
-  RenameTaskOptions,
   RenameTaskSuccess,
   Task,
   TaskLifecycleStatus,
@@ -33,6 +32,8 @@ export type UnregisteredTaskData = {
   createdAt: string;
   statusChangedAt: string;
   isPinned: boolean;
+  type: 'task' | 'automation-run';
+  automationRunId?: string;
 };
 
 export class TaskStore {
@@ -182,14 +183,11 @@ export class TaskStore {
     return (this.data as Task).conversations;
   }
 
-  async rename(
-    name: string,
-    options?: RenameTaskOptions
-  ): Promise<Result<RenameTaskSuccess, RenameTaskError>> {
+  async rename(name: string): Promise<Result<RenameTaskSuccess, RenameTaskError>> {
     const task = registeredTaskData(this);
     if (!task) return err({ type: 'task-not-found', taskId: this.data.id });
     try {
-      const result = await rpc.tasks.renameTask(task.projectId, task.id, name, options);
+      const result = await rpc.tasks.renameTask(task.projectId, task.id, name);
       if (!result.success) {
         return result;
       }
@@ -197,7 +195,6 @@ export class TaskStore {
         const current = registeredTaskData(this);
         if (current) {
           current.name = name;
-          current.taskBranch = result.data.task.taskBranch;
         }
       });
       return result;
@@ -259,6 +256,24 @@ export class TaskStore {
     } catch (e) {
       runInAction(() => {
         task.linkedIssue = previousIssue;
+      });
+      console.error(e);
+      throw e;
+    }
+  }
+
+  async convertAutomationTask(): Promise<void> {
+    if (this.state === 'unregistered') return;
+    const task = registeredTaskData(this);
+    if (!task || task.type !== 'automation-run') return;
+    runInAction(() => {
+      task.type = 'task';
+    });
+    try {
+      await rpc.tasks.convertAutomationTask(task.id);
+    } catch (e) {
+      runInAction(() => {
+        task.type = 'automation-run';
       });
       console.error(e);
       throw e;

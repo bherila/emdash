@@ -1,8 +1,8 @@
 import { ChevronDown, Ellipsis, ExternalLink, GithubIcon, Globe, Trash2 } from 'lucide-react';
 import { observer } from 'mobx-react-lite';
+import { useConfirmDeleteProject } from '@renderer/features/projects/hooks/use-confirm-delete-project';
 import {
   asMounted,
-  getProjectManagerStore,
   getProjectStore,
   getRepositoryStore,
   projectDisplayName,
@@ -12,7 +12,6 @@ import { OpenInMenu } from '@renderer/lib/components/titlebar/open-in-menu';
 import { Titlebar } from '@renderer/lib/components/titlebar/Titlebar';
 import { rpc } from '@renderer/lib/ipc';
 import { useNavigate, useParams } from '@renderer/lib/layout/navigation-provider';
-import { useShowModal } from '@renderer/lib/modal/modal-provider';
 import { Button } from '@renderer/lib/ui/button';
 import {
   DropdownMenu,
@@ -30,8 +29,8 @@ const MountedProjectTitlebarLeft = observer(function ProjectTitlebarLeft({
 }) {
   const { navigate } = useNavigate();
   const store = getProjectStore(projectId);
-  const displayName = projectDisplayName(store);
-  const showConfirmDeleteProject = useShowModal('confirmActionModal');
+  const displayName = projectDisplayName(store) ?? 'this project';
+  const confirmDeleteProject = useConfirmDeleteProject();
 
   const repo = getRepositoryStore(projectId);
   const baseRemote = repo?.baseRemote;
@@ -59,14 +58,10 @@ const MountedProjectTitlebarLeft = observer(function ProjectTitlebarLeft({
           <DropdownMenuItem
             className="flex items-center gap-2 text-foreground-destructive"
             onClick={() => {
-              showConfirmDeleteProject({
-                title: 'Delete project',
-                description: `"${displayName}" will be deleted. The project folder and worktrees will stay on the filesystem.`,
-                confirmLabel: 'Delete',
-                onSuccess: () => {
-                  void getProjectManagerStore().deleteProject(projectId);
-                  navigate('home');
-                },
+              void confirmDeleteProject({
+                projectId,
+                projectLabel: displayName,
+                onDeleted: () => navigate('home'),
               });
             }}
           >
@@ -130,17 +125,18 @@ export const ProjectTitlebar = observer(function ProjectTitlebar() {
   const mounted = asMounted(store);
   if (!mounted) return <Titlebar leftSlot={<ProjectTitlebarLeft projectId={projectId} />} />;
 
-  const isRemote = mounted.data.type === 'ssh';
-
   return (
     <Titlebar
       leftSlot={<MountedProjectTitlebarLeft projectId={projectId} />}
       rightSlot={
-        !isRemote ? (
-          <div className="mr-2 flex items-center gap-2">
-            <OpenInMenu path={mounted.data.path} className="h-7 bg-background" />
-          </div>
-        ) : undefined
+        <div className="mr-2 flex items-center gap-2">
+          <OpenInMenu
+            path={mounted.data.path}
+            className="h-7 bg-background"
+            isRemote={mounted.data.type === 'ssh'}
+            sshConnectionId={mounted.data.type === 'ssh' ? mounted.data.connectionId : undefined}
+          />
+        </div>
       }
     />
   );

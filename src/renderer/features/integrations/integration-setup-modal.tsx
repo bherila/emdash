@@ -18,9 +18,20 @@ import GitLabSetupForm from './GitLabSetupForm';
 import { useIntegrationsContext } from './integrations-provider';
 import JiraSetupForm from './JiraSetupForm';
 import LinearSetupForm from './LinearSetupForm';
+import MondaySetupForm from './MondaySetupForm';
 import PlainSetupForm from './PlainSetupForm';
+import TrelloSetupForm from './TrelloSetupForm';
 
-type IntegrationType = 'linear' | 'jira' | 'gitlab' | 'plain' | 'forgejo' | 'featurebase' | 'asana';
+type IntegrationType =
+  | 'linear'
+  | 'jira'
+  | 'gitlab'
+  | 'plain'
+  | 'forgejo'
+  | 'featurebase'
+  | 'asana'
+  | 'monday'
+  | 'trello';
 
 type IntegrationSetupModalArgs = {
   integration: IntegrationType;
@@ -57,6 +68,14 @@ const descriptions: Record<IntegrationType, { title: string; subtitle: string }>
     title: 'Connect Asana',
     subtitle: 'Enter your Asana personal access token to connect your workspace.',
   },
+  monday: {
+    title: 'Connect Monday.com',
+    subtitle: 'Enter your Monday.com API token and optionally specify board URLs.',
+  },
+  trello: {
+    title: 'Connect Trello',
+    subtitle: 'Enter your Trello API key and token, and optionally specify board URLs.',
+  },
 };
 
 export function IntegrationSetupModal({ integration, onSuccess, onClose }: Props) {
@@ -68,6 +87,8 @@ export function IntegrationSetupModal({ integration, onSuccess, onClose }: Props
     connectForgejo,
     connectFeaturebase,
     connectAsana,
+    connectMonday,
+    connectTrello,
     isLinearLoading,
     isJiraLoading,
     isGitlabLoading,
@@ -75,6 +96,8 @@ export function IntegrationSetupModal({ integration, onSuccess, onClose }: Props
     isForgejoLoading,
     isFeaturebaseLoading,
     isAsanaLoading,
+    isMondayLoading,
+    isTrelloLoading,
   } = useIntegrationsContext();
   const { toast } = useToast();
 
@@ -103,6 +126,15 @@ export function IntegrationSetupModal({ integration, onSuccess, onClose }: Props
   // Asana state
   const [asanaKey, setAsanaKey] = useState('');
 
+  // Monday state
+  const [mondayToken, setMondayToken] = useState('');
+  const [mondayBoardUrls, setMondayBoardUrls] = useState('');
+
+  // Trello state
+  const [trelloApiKey, setTrelloApiKey] = useState('');
+  const [trelloToken, setTrelloToken] = useState('');
+  const [trelloBoardUrls, setTrelloBoardUrls] = useState('');
+
   const [error, setError] = useState<string | null>(null);
 
   const isLoading =
@@ -112,7 +144,9 @@ export function IntegrationSetupModal({ integration, onSuccess, onClose }: Props
     (integration === 'plain' && isPlainLoading) ||
     (integration === 'forgejo' && isForgejoLoading) ||
     (integration === 'featurebase' && isFeaturebaseLoading) ||
-    (integration === 'asana' && isAsanaLoading);
+    (integration === 'asana' && isAsanaLoading) ||
+    (integration === 'monday' && isMondayLoading) ||
+    (integration === 'trello' && isTrelloLoading);
 
   const canSubmit =
     (integration === 'linear' && !!linearKey.trim()) ||
@@ -121,7 +155,9 @@ export function IntegrationSetupModal({ integration, onSuccess, onClose }: Props
     (integration === 'plain' && !!plainKey.trim()) ||
     (integration === 'forgejo' && !!(forgejoInstanceUrl.trim() && forgejoToken.trim())) ||
     (integration === 'featurebase' && !!featurebaseKey.trim()) ||
-    (integration === 'asana' && !!asanaKey.trim());
+    (integration === 'asana' && !!asanaKey.trim()) ||
+    (integration === 'monday' && !!mondayToken.trim()) ||
+    (integration === 'trello' && !!(trelloApiKey.trim() && trelloToken.trim()));
 
   const handleSubmit = useCallback(async () => {
     setError(null);
@@ -158,6 +194,16 @@ export function IntegrationSetupModal({ integration, onSuccess, onClose }: Props
         case 'asana':
           await connectAsana(asanaKey.trim());
           break;
+        case 'monday':
+          await connectMonday({ token: mondayToken.trim(), boardUrls: mondayBoardUrls.trim() });
+          break;
+        case 'trello':
+          await connectTrello({
+            apiKey: trelloApiKey.trim(),
+            token: trelloToken.trim(),
+            boardUrls: trelloBoardUrls.trim(),
+          });
+          break;
       }
       toast({
         title: 'Integration connected',
@@ -180,6 +226,11 @@ export function IntegrationSetupModal({ integration, onSuccess, onClose }: Props
     forgejoToken,
     featurebaseKey,
     asanaKey,
+    mondayToken,
+    mondayBoardUrls,
+    trelloApiKey,
+    trelloToken,
+    trelloBoardUrls,
     connectLinear,
     connectJira,
     connectGitlab,
@@ -187,6 +238,8 @@ export function IntegrationSetupModal({ integration, onSuccess, onClose }: Props
     connectForgejo,
     connectFeaturebase,
     connectAsana,
+    connectMonday,
+    connectTrello,
     toast,
     onSuccess,
   ]);
@@ -250,6 +303,30 @@ export function IntegrationSetupModal({ integration, onSuccess, onClose }: Props
         )}
         {integration === 'asana' && (
           <AsanaSetupForm apiKey={asanaKey} onChange={setAsanaKey} error={error} />
+        )}
+        {integration === 'monday' && (
+          <MondaySetupForm
+            token={mondayToken}
+            boardUrls={mondayBoardUrls}
+            onChange={(u) => {
+              if (typeof u.token === 'string') setMondayToken(u.token);
+              if (typeof u.boardUrls === 'string') setMondayBoardUrls(u.boardUrls);
+            }}
+            error={error}
+          />
+        )}
+        {integration === 'trello' && (
+          <TrelloSetupForm
+            apiKey={trelloApiKey}
+            token={trelloToken}
+            boardUrls={trelloBoardUrls}
+            onChange={(u) => {
+              if (typeof u.apiKey === 'string') setTrelloApiKey(u.apiKey);
+              if (typeof u.token === 'string') setTrelloToken(u.token);
+              if (typeof u.boardUrls === 'string') setTrelloBoardUrls(u.boardUrls);
+            }}
+            error={error}
+          />
         )}
       </DialogContentArea>
       <DialogFooter>

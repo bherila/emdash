@@ -46,6 +46,8 @@ export const projects = sqliteTable(
     sshConnectionId: text('ssh_connection_id').references(() => sshConnections.id, {
       onDelete: 'set null',
     }),
+    /** The shared workspace representing this project's repository root. Set on first mount. */
+    repositoryWorkspaceId: text('repository_workspace_id'),
     createdAt: text('created_at')
       .notNull()
       .default(sql`CURRENT_TIMESTAMP`),
@@ -111,8 +113,8 @@ export const tasks = sqliteTable(
       .references(() => projects.id, { onDelete: 'cascade' }),
     name: text('name').notNull(),
     status: text('status').notNull(),
-    sourceBranch: text('source_branch').$type<StoredBranch>(),
-    taskBranch: text('task_branch'),
+    sourceBranch: text('source_branch').$type<StoredBranch>(), // @deprecated — moved to workspaces.config (git.fromBranch)
+    taskBranch: text('task_branch'), // @deprecated — moved to workspaces.branch_name
     linkedIssue: text('linked_issue'),
     archivedAt: text('archived_at'), // null = active, timestamp = archived
     createdAt: text('created_at')
@@ -129,6 +131,9 @@ export const tasks = sqliteTable(
     workspaceProvider: text('workspace_provider'), // @deprecated — superseded by workspaces.type; still read in resolveBootstrap for legacy BYOI tasks
     workspaceId: text('workspace_id'),
     workspaceProviderData: text('workspace_provider_data'), // @deprecated — superseded by workspaces.data
+    workspaceIntent: text('workspace_intent'), // JSON: { git: GitSetup; workspace: WorkspaceLocation }
+    type: text('type').notNull().default('task'), // 'task' | 'automation-run'
+    automationRunId: text('automation_run_id'), // set when type = 'automation-run'; FK added after automationRuns is defined
   },
   (table) => ({
     projectIdIdx: index('idx_tasks_project_id').on(table.projectId),
@@ -140,9 +145,19 @@ export const workspaces = sqliteTable(
   {
     id: text('id').primaryKey(),
     key: text('key'),
-    type: text('type').notNull().$type<'local' | 'project-ssh' | 'byoi'>(),
+    type: text('type').notNull().$type<'local' | 'project-ssh' | 'byoi'>(), // @deprecated — use kind + location
+    /** Describes the nature of the workspace: a git worktree, the project root, or BYOI. */
+    kind: text('kind').$type<'worktree' | 'project-root' | 'byoi'>(),
+    /** Where the workspace runs: on the local machine or over SSH. */
+    location: text('location').$type<'local' | 'remote'>(),
+    /** FK to ssh_connections; only set when location = 'remote'. */
+    sshConnectionId: text('ssh_connection_id').references(() => sshConnections.id, {
+      onDelete: 'set null',
+    }),
     data: text('data'),
     path: text('path'),
+    config: text('config'),
+    branchName: text('branch_name'),
     linesAdded: integer('lines_added'),
     linesDeleted: integer('lines_deleted'),
     createdAt: text('created_at')
@@ -273,6 +288,67 @@ export const pullRequestChecks = sqliteTable(
   })
 );
 
+export const automations = sqliteTable(
+  'automations',
+  {
+    id: text('id').primaryKey(),
+    name: text('name').notNull(),
+    projectId: text('project_id').references(() => projects.id, { onDelete: 'set null' }),
+    triggerConfig: text('trigger_config'),
+    conversationConfig: text('conversation_config'),
+    taskConfig: text('task_config'),
+    enabled: integer('enabled').notNull().default(1),
+    createdAt: integer('created_at').notNull(),
+    updatedAt: integer('updated_at').notNull(),
+    deletedAt: integer('deleted_at'),
+  },
+  (table) => ({
+    projectIdIdx: index('idx_automations_project_id').on(table.projectId),
+  })
+);
+
+export const automationRuns = sqliteTable(
+  'automation_runs',
+  {
+    id: text('id').primaryKey(),
+    automationId: text('automation_id')
+      .notNull()
+      .references(() => automations.id, { onDelete: 'cascade' }),
+    scheduledAt: integer('scheduled_at'),
+    deadlineAt: integer('deadline_at'),
+    startedAt: integer('started_at'),
+    taskCreatedAt: integer('task_created_at'),
+    launchedAt: integer('launched_at'),
+    finishedAt: integer('finished_at'),
+    status: text('status').notNull(),
+    error: text('error'),
+    triggerKind: text('trigger_kind').notNull(),
+    triggerConfigSnapshot: text('trigger_config_snapshot').notNull().default('{}'),
+    conversationConfigSnapshot: text('conversation_config_snapshot').notNull().default('{}'),
+    taskConfigSnapshot: text('task_config_snapshot'),
+    generatedTaskName: text('generated_task_name'),
+  },
+  (table) => ({
+    automationStartedIdx: index('idx_automation_runs_automation_started').on(
+      table.automationId,
+      table.startedAt
+    ),
+    automationScheduledIdx: index('idx_automation_runs_automation_scheduled').on(
+      table.automationId,
+      table.scheduledAt
+    ),
+    automationStatusIdx: index('idx_automation_runs_automation_status').on(
+      table.automationId,
+      table.status
+    ),
+    statusIdx: index('idx_automation_runs_status').on(table.status),
+    statusScheduledIdx: index('idx_automation_runs_status_scheduled').on(
+      table.status,
+      table.scheduledAt
+    ),
+  })
+);
+
 export const conversations = sqliteTable(
   'conversations',
   {
@@ -294,6 +370,9 @@ export const conversations = sqliteTable(
       .default(sql`CURRENT_TIMESTAMP`),
     lastInteractedAt: text('last_interacted_at'),
     isInitialConversation: integer('is_initial_conversation', { mode: 'boolean' }),
+    sessionId: text('session_id'),
+    agentStatus: text('agent_status'),
+    agentStatusSeen: integer('agent_status_seen').default(1),
   },
   (table) => ({
     taskIdIdx: index('idx_conversations_task_id').on(table.taskId),
@@ -396,6 +475,7 @@ export const sshConnectionsRelations = relations(sshConnections, ({ many }) => (
 
 export const projectsRelations = relations(projects, ({ one, many }) => ({
   tasks: many(tasks),
+  automations: many(automations),
   settings: one(projectSettings, {
     fields: [projects.id],
     references: [projectSettings.projectId],
@@ -419,6 +499,22 @@ export const tasksRelations = relations(tasks, ({ one, many }) => ({
     references: [projects.id],
   }),
   conversations: many(conversations),
+  automationRuns: many(automationRuns),
+}));
+
+export const automationsRelations = relations(automations, ({ one, many }) => ({
+  project: one(projects, {
+    fields: [automations.projectId],
+    references: [projects.id],
+  }),
+  runs: many(automationRuns),
+}));
+
+export const automationRunsRelations = relations(automationRuns, ({ one }) => ({
+  automation: one(automations, {
+    fields: [automationRuns.automationId],
+    references: [automations.id],
+  }),
 }));
 
 export const conversationsRelations = relations(conversations, ({ one, many }) => ({
@@ -439,6 +535,8 @@ export const messagesRelations = relations(messages, ({ one }) => ({
 export type SshConnectionRow = typeof sshConnections.$inferSelect;
 export type SshConnectionInsert = typeof sshConnections.$inferInsert;
 export type ProjectRow = typeof projects.$inferSelect;
+export type AutomationRow = typeof automations.$inferSelect;
+export type AutomationRunRow = typeof automationRuns.$inferSelect;
 export type ProjectSettingsRow = typeof projectSettings.$inferSelect;
 export type ProjectSettingsInsert = typeof projectSettings.$inferInsert;
 export type TaskRow = typeof tasks.$inferSelect;

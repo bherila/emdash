@@ -1,8 +1,8 @@
 import { homedir } from 'node:os';
 import { agentHookService } from '@main/core/agent-hooks/agent-hook-service';
 import { wireAgentClassifier } from '@main/core/agent-hooks/classifier-wiring';
-import { claudeTrustService } from '@main/core/agent-hooks/claude-trust-service';
 import { HookConfigWriter } from '@main/core/agent-hooks/hook-config';
+import { workspaceTrustService } from '@main/core/agent-hooks/workspace-trust-service';
 import { ConversationSessionSupervisor } from '@main/core/conversations/conversation-session-supervisor';
 import { resolveAgentSessionCommandArgs } from '@main/core/conversations/resolve-agent-session-command';
 import type { ConversationProvider } from '@main/core/conversations/types';
@@ -16,6 +16,7 @@ import { logLocalPtySpawnWarnings, resolveLocalPtySpawn } from '@main/core/pty/p
 import { killTmuxSession, makeTmuxSessionName } from '@main/core/pty/tmux-session-name';
 import { providerOverrideSettings } from '@main/core/settings/provider-settings-service';
 import { appSettingsService } from '@main/core/settings/settings-service';
+import type { ResolvedShellProfile } from '@main/core/terminal-shell/types';
 import { events } from '@main/lib/events';
 import { log } from '@main/lib/logger';
 import { telemetryService } from '@main/lib/telemetry';
@@ -26,6 +27,7 @@ import { makePtyId } from '@shared/ptyId';
 import { makePtySessionId } from '@shared/ptySessionId';
 import { buildAgentSessionCommand } from './agent-command';
 import { syncGrokThemeWithAppTheme } from './grok-theme-config';
+import { createInitialPromptDelivery } from './initial-prompt-delivery';
 import { scheduleInitialPromptInjection } from './keystroke-injection';
 import { resolveProviderEnv } from './provider-env';
 
@@ -42,6 +44,7 @@ export class LocalConversationProvider implements ConversationProvider {
   private readonly taskId: string;
   private readonly tmux: boolean;
   private readonly shellSetup?: string;
+  private readonly shellProfile: ResolvedShellProfile;
   private readonly ctx: IExecutionContext;
   private readonly taskEnvVars: Record<string, string>;
   private readonly hookConfigWriter: HookConfigWriter;
@@ -56,6 +59,7 @@ export class LocalConversationProvider implements ConversationProvider {
     taskId,
     tmux = false,
     shellSetup,
+    shellProfile,
     ctx,
     taskEnvVars = {},
   }: {
@@ -64,6 +68,7 @@ export class LocalConversationProvider implements ConversationProvider {
     taskId: string;
     tmux?: boolean;
     shellSetup?: string;
+    shellProfile: ResolvedShellProfile;
     ctx: IExecutionContext;
     taskEnvVars?: Record<string, string>;
   }) {
@@ -72,6 +77,7 @@ export class LocalConversationProvider implements ConversationProvider {
     this.taskId = taskId;
     this.tmux = tmux;
     this.shellSetup = shellSetup;
+    this.shellProfile = shellProfile;
     this.ctx = ctx;
     this.taskEnvVars = taskEnvVars;
     this.hookConfigWriter = new HookConfigWriter(new LocalFileSystem(taskPath), ctx);
@@ -104,28 +110,40 @@ export class LocalConversationProvider implements ConversationProvider {
     this.knownSessionIds.add(sessionId);
 
     const spawnSize = ptySessionRegistry.getLastSize(sessionId) ?? initialSize;
-    const spawnToken = this.supervisor.beginStart(sessionId, { requireDesired });
+    const spawnToken = this.supervisor.beginStart(sessionId, {
+      requireDesired,
+      mode: isResuming ? 'resume' : 'fresh',
+    });
     if (!spawnToken) return;
 
     try {
-      await claudeTrustService.maybeAutoTrustLocal({
+      await workspaceTrustService.maybeAutoTrustLocal({
         providerId: conversation.providerId,
         cwd: this.taskPath,
         homedir: homedir(),
+        force: conversation.autoApprove === true,
       });
       const hooksAvailable = await this.prepareHookConfig(conversation.providerId);
 
       const providerConfig = await providerOverrideSettings.getItem(conversation.providerId);
       const providerDef = getProvider(conversation.providerId);
       const agentSession = resolveAgentSessionCommandArgs(conversation, isResuming);
+      const initialPromptDelivery = createInitialPromptDelivery({
+        providerId: conversation.providerId,
+        conversationId: conversation.id,
+        providerConfig,
+        initialPrompt,
+        isResuming: agentSession.isResuming,
+      });
       const { command, args } = buildAgentSessionCommand({
         providerId: conversation.providerId,
         providerConfig,
         autoApprove: conversation.autoApprove,
+        extraInitialArgs: initialPromptDelivery.argvAddition(),
+        initialPrompt,
         sessionId: agentSession.sessionId,
         providerSessionId: conversation.providerSessionId,
         isResuming: agentSession.isResuming,
-        initialPrompt,
       });
       const providerEnv = resolveProviderEnv(providerConfig, {
         providerId: conversation.providerId,
@@ -144,6 +162,7 @@ export class LocalConversationProvider implements ConversationProvider {
           kind: 'run-command',
           cwd: this.taskPath,
           command: { kind: 'argv', command, args },
+          shellProfile: this.shellProfile,
           shellSetup: this.shellSetup,
           tmuxSessionName,
         },
@@ -172,6 +191,7 @@ export class LocalConversationProvider implements ConversationProvider {
           ...buildAgentEnv({
             hook: port > 0 ? { port, ptyId, token } : undefined,
             providerVars: providerEnv,
+            shellProfile: this.shellProfile,
           }),
           ...this.taskEnvVars,
           ...(ampHooksAvailable && !this.taskEnvVars['PLUGINS'] ? { PLUGINS: 'all' } : {}),
@@ -183,8 +203,9 @@ export class LocalConversationProvider implements ConversationProvider {
       /*
        * Codex hooks can be skipped by the CLI in some live-session edge cases.
        * Amp hooks only cover lifecycle events today, and Grok hook emission is
-       * still early-beta. Keep the output classifier active as a fallback so
-       * the UI can leave "working" and catch prompts.
+       * still early-beta. Kimi hooks include the needed lifecycle events, but
+       * the new CLI/docs are still changing. Keep the output classifier active
+       * as a fallback so the UI can leave "working" and catch prompts.
        */
       const useHooksOnly =
         hookActive &&
@@ -192,6 +213,7 @@ export class LocalConversationProvider implements ConversationProvider {
         hooksAvailable &&
         conversation.providerId !== 'codex' &&
         conversation.providerId !== 'grok' &&
+        conversation.providerId !== 'kimi' &&
         conversation.providerId !== 'amp';
 
       if (!useHooksOnly) {
@@ -218,10 +240,6 @@ export class LocalConversationProvider implements ConversationProvider {
           taskId: conversation.taskId,
         });
 
-        if (decision.kind === 'failed') {
-          return;
-        }
-
         if (this.tmux) {
           return;
         }
@@ -230,6 +248,7 @@ export class LocalConversationProvider implements ConversationProvider {
           this.scheduleReplacement({
             conversation,
             initialSize: replacementSize,
+            isResuming: decision.kind === 'respawnResume',
           });
         }
       });
@@ -369,17 +388,21 @@ export class LocalConversationProvider implements ConversationProvider {
   private scheduleReplacement({
     conversation,
     initialSize,
+    isResuming,
   }: {
     conversation: Conversation;
     initialSize: { cols: number; rows: number };
+    isResuming: boolean;
   }): void {
     setTimeout(() => {
-      this.startSessionInternal(conversation, initialSize, true, undefined, true).catch((e) => {
-        log.error('LocalConversationProvider: replacement failed', {
-          conversationId: conversation.id,
-          error: String(e),
-        });
-      });
+      this.startSessionInternal(conversation, initialSize, isResuming, undefined, true).catch(
+        (e) => {
+          log.error('LocalConversationProvider: replacement failed', {
+            conversationId: conversation.id,
+            error: String(e),
+          });
+        }
+      );
     }, RESPAWN_DELAY_MS);
   }
 }

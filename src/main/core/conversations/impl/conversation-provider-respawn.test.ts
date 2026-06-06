@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { CONVERSATION_FRESH_RECOVERY_GRACE_MS } from '@main/core/conversations/conversation-session-supervisor';
 import type { Pty, PtyExitInfo } from '@main/core/pty/pty';
 import { ptySessionRegistry } from '@main/core/pty/pty-session-registry';
 import type { Conversation } from '@shared/conversations';
@@ -10,6 +11,7 @@ import { SshConversationProvider } from './ssh-conversation';
 
 const spawnLocalPty = vi.hoisted(() => vi.fn());
 const openSsh2Pty = vi.hoisted(() => vi.fn());
+const hookConfigWriteForProvider = vi.hoisted(() => vi.fn(async () => false));
 
 vi.mock('@main/core/agent-hooks/agent-hook-service', () => ({
   agentHookService: {
@@ -31,7 +33,7 @@ vi.mock('@main/core/agent-hooks/claude-trust-service', () => ({
 
 vi.mock('@main/core/agent-hooks/hook-config', () => ({
   HookConfigWriter: class {
-    writeForProvider = vi.fn(async () => false);
+    writeForProvider = hookConfigWriteForProvider;
   },
 }));
 
@@ -80,11 +82,22 @@ vi.mock('@main/core/settings/provider-settings-service', () => ({
 
 vi.mock('@main/core/settings/settings-service', () => ({
   appSettingsService: {
-    get: vi.fn(async () => ({ writeAgentConfigToGitIgnore: true })),
+    get: vi.fn(async (key: string) =>
+      key === 'terminal'
+        ? { autoCopyOnSelection: false, defaultShell: 'system', fontSize: 13 }
+        : {
+            defaultProjectsDirectory: '',
+            defaultWorktreeDirectory: '',
+            writeAgentConfigToGitIgnore: true,
+          }
+    ),
   },
 }));
 
 const { events } = await import('@main/lib/events');
+const { agentHookService } = await import('@main/core/agent-hooks/agent-hook-service');
+const { wireAgentClassifier } = await import('@main/core/agent-hooks/classifier-wiring');
+const { appSettingsService } = await import('@main/core/settings/settings-service');
 const { buildAgentSessionCommand } = await import('./agent-command');
 
 type RespawnState = {
@@ -94,9 +107,20 @@ type RespawnState = {
 
 function localProvider({
   tmux = false,
+  shellProfile = {
+    id: 'sh',
+    resolvedShellId: 'sh',
+    resolvedFromSystem: true,
+    executable: 'sh',
+    available: true,
+    family: 'posix',
+    interactiveArgs: ['-i'],
+    commandArgs: ['-c'],
+  },
   ctx = {} as never,
 }: {
   tmux?: boolean;
+  shellProfile?: ConstructorParameters<typeof LocalConversationProvider>[0]['shellProfile'];
   ctx?: ConstructorParameters<typeof LocalConversationProvider>[0]['ctx'];
 } = {}) {
   return new LocalConversationProvider({
@@ -104,6 +128,7 @@ function localProvider({
     taskId: 'task-1',
     taskPath: '/tmp/task-1',
     tmux,
+    shellProfile,
     ctx,
   });
 }
@@ -151,20 +176,41 @@ function fakePty(exitHandlers: Array<(info: PtyExitInfo) => void>): Pty {
   };
 }
 
+function mockSettings(): void {
+  vi.mocked(appSettingsService.get).mockImplementation(async (key) => {
+    if (key === 'localProject') {
+      return {
+        defaultProjectsDirectory: '',
+        defaultWorktreeDirectory: '',
+        writeAgentConfigToGitIgnore: true,
+      } as never;
+    }
+    throw new Error(`Unexpected settings key: ${key}`);
+  });
+}
+
 describe('conversation provider respawn state', () => {
   beforeEach(() => {
     vi.useRealTimers();
     spawnLocalPty.mockReset();
     openSsh2Pty.mockReset();
+    hookConfigWriteForProvider.mockReset();
+    hookConfigWriteForProvider.mockResolvedValue(false);
+    mockSettings();
     vi.mocked(events.emit).mockClear();
+    vi.mocked(agentHookService.getPort).mockReturnValue(0);
+    vi.mocked(agentHookService.getToken).mockReturnValue('token');
+    vi.mocked(wireAgentClassifier).mockClear();
     vi.mocked(buildAgentSessionCommand).mockClear();
     ptySessionRegistry.unregister('project-1:task-1:conversation-1');
   });
 
   it('passes global editor variables to local agent sessions', async () => {
     const previousEditor = process.env.EDITOR;
+    const previousShell = process.env.SHELL;
     try {
       process.env.EDITOR = 'zed';
+      process.env.SHELL = '/bin/zsh';
       const exitHandlers: Array<(info: PtyExitInfo) => void> = [];
       spawnLocalPty.mockReturnValue(fakePty(exitHandlers));
 
@@ -172,17 +218,86 @@ describe('conversation provider respawn state', () => {
 
       const request = spawnLocalPty.mock.calls[0][0] as { env: Record<string, string> };
       expect(request.env.EDITOR).toBe('zed');
-      expect(request.env.SHELL).toBeUndefined();
+      expect(request.env.SHELL).toBe('sh');
     } finally {
       if (previousEditor === undefined) {
         delete process.env.EDITOR;
       } else {
         process.env.EDITOR = previousEditor;
       }
+      if (previousShell === undefined) {
+        delete process.env.SHELL;
+      } else {
+        process.env.SHELL = previousShell;
+      }
     }
   });
 
-  it('replaces a local conversation after clean exit by resuming the same provider session', async () => {
+  it('uses the injected shell profile for local agent sessions', async () => {
+    const shellProfile: ConstructorParameters<typeof LocalConversationProvider>[0]['shellProfile'] =
+      {
+        id: 'bash',
+        resolvedShellId: 'bash',
+        resolvedFromSystem: false,
+        executable: 'bash',
+        available: true,
+        family: 'posix',
+        interactiveArgs: ['-il'],
+        commandArgs: ['-lc'],
+      };
+    const exitHandlers: Array<(info: PtyExitInfo) => void> = [];
+    spawnLocalPty.mockReturnValue(fakePty(exitHandlers));
+
+    await localProvider({ shellProfile }).startSession(conversation());
+
+    expect(spawnLocalPty).toHaveBeenCalledWith(
+      expect.objectContaining({
+        command: 'bash',
+        args: ['-lc', 'agent'],
+      })
+    );
+  });
+
+  it('sets SHELL to the injected POSIX shell for local agent sessions', async () => {
+    const shellProfile: ConstructorParameters<typeof LocalConversationProvider>[0]['shellProfile'] =
+      {
+        id: 'bash',
+        resolvedShellId: 'bash',
+        resolvedFromSystem: false,
+        executable: '/bin/bash',
+        available: true,
+        family: 'posix',
+        interactiveArgs: ['-il'],
+        commandArgs: ['-lc'],
+      };
+    const exitHandlers: Array<(info: PtyExitInfo) => void> = [];
+    spawnLocalPty.mockReturnValue(fakePty(exitHandlers));
+
+    await localProvider({ shellProfile }).startSession(conversation());
+
+    expect(spawnLocalPty).toHaveBeenCalledWith(
+      expect.objectContaining({
+        env: expect.objectContaining({ SHELL: '/bin/bash' }),
+      })
+    );
+  });
+
+  it('uses OpenCode hooks without the output classifier when hook config is available', async () => {
+    hookConfigWriteForProvider.mockResolvedValue(true);
+    vi.mocked(agentHookService.getPort).mockReturnValue(1234);
+    const exitHandlers: Array<(info: PtyExitInfo) => void> = [];
+    spawnLocalPty.mockReturnValue(fakePty(exitHandlers));
+    const item = { ...conversation(), providerId: 'opencode' as const };
+
+    await localProvider().startSession(item);
+
+    expect(hookConfigWriteForProvider).toHaveBeenCalledWith('opencode', {
+      writeGitIgnoreEntries: true,
+    });
+    expect(wireAgentClassifier).not.toHaveBeenCalled();
+  });
+
+  it('starts a local conversation fresh after a resumed session exits', async () => {
     vi.useFakeTimers();
     try {
       const exitHandlers: Array<Array<(info: PtyExitInfo) => void>> = [];
@@ -202,6 +317,65 @@ describe('conversation provider respawn state', () => {
 
       expect(spawnLocalPty).toHaveBeenCalledTimes(2);
       expect(buildAgentSessionCommand).toHaveBeenLastCalledWith(
+        expect.objectContaining({ isResuming: false })
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stops local recovery when a fresh fallback exits before the startup grace period', async () => {
+    vi.useFakeTimers();
+    try {
+      const exitHandlers: Array<Array<(info: PtyExitInfo) => void>> = [];
+      spawnLocalPty.mockImplementation(() => {
+        const handlers: Array<(info: PtyExitInfo) => void> = [];
+        exitHandlers.push(handlers);
+        return fakePty(handlers);
+      });
+      const provider = localProvider();
+      const item = conversation();
+
+      await provider.startSession(item, undefined, true);
+      for (const handler of exitHandlers[0] ?? []) handler({ exitCode: 0 });
+      await vi.advanceTimersByTimeAsync(500);
+      for (const handler of exitHandlers[1] ?? []) handler({ exitCode: 0 });
+      await vi.advanceTimersByTimeAsync(500);
+
+      expect(spawnLocalPty).toHaveBeenCalledTimes(2);
+      expect(events.emit).toHaveBeenCalledWith(
+        agentSessionExitedChannel,
+        expect.objectContaining({
+          conversationId: item.id,
+          taskId: item.taskId,
+        })
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('starts a new local recovery cycle after fresh fallback survives the startup grace period', async () => {
+    vi.useFakeTimers();
+    try {
+      const exitHandlers: Array<Array<(info: PtyExitInfo) => void>> = [];
+      spawnLocalPty.mockImplementation(() => {
+        const handlers: Array<(info: PtyExitInfo) => void> = [];
+        exitHandlers.push(handlers);
+        return fakePty(handlers);
+      });
+      const provider = localProvider();
+      const item = conversation();
+
+      await provider.startSession(item, undefined, true);
+      for (const handler of exitHandlers[0] ?? []) handler({ exitCode: 0 });
+      await vi.advanceTimersByTimeAsync(500);
+      await vi.advanceTimersByTimeAsync(CONVERSATION_FRESH_RECOVERY_GRACE_MS);
+      for (const handler of exitHandlers[1] ?? []) handler({ exitCode: 0 });
+      await vi.advanceTimersByTimeAsync(500);
+
+      expect(spawnLocalPty).toHaveBeenCalledTimes(3);
+      expect(buildAgentSessionCommand).toHaveBeenLastCalledWith(
         expect.objectContaining({ isResuming: true })
       );
     } finally {
@@ -209,7 +383,7 @@ describe('conversation provider respawn state', () => {
     }
   });
 
-  it('replaces an SSH conversation after clean exit by resuming the same provider session', async () => {
+  it('starts an SSH conversation fresh after a resumed session exits', async () => {
     vi.useFakeTimers();
     try {
       const exitHandlers: Array<Array<(info: PtyExitInfo) => void>> = [];
@@ -229,7 +403,7 @@ describe('conversation provider respawn state', () => {
 
       expect(openSsh2Pty).toHaveBeenCalledTimes(2);
       expect(buildAgentSessionCommand).toHaveBeenLastCalledWith(
-        expect.objectContaining({ isResuming: true })
+        expect.objectContaining({ isResuming: false })
       );
     } finally {
       vi.useRealTimers();
@@ -324,7 +498,7 @@ describe('conversation provider respawn state', () => {
     }
   });
 
-  it('does not loop if the replacement exits inside the failure window', async () => {
+  it('starts a local conversation fresh after one resume replacement exits', async () => {
     vi.useFakeTimers();
     try {
       const exitHandlers: Array<Array<(info: PtyExitInfo) => void>> = [];
@@ -338,14 +512,43 @@ describe('conversation provider respawn state', () => {
 
       await provider.startSession(item);
 
-      for (const handler of exitHandlers[0] ?? []) handler({ exitCode: 1 });
-      await vi.advanceTimersByTimeAsync(500);
-      expect(spawnLocalPty).toHaveBeenCalledTimes(2);
+      for (let index = 0; index < 2; index += 1) {
+        for (const handler of exitHandlers[index] ?? []) handler({ exitCode: 1 });
+        await vi.advanceTimersByTimeAsync(500);
+      }
 
-      for (const handler of exitHandlers[1] ?? []) handler({ exitCode: 1 });
-      await vi.advanceTimersByTimeAsync(500);
+      expect(spawnLocalPty).toHaveBeenCalledTimes(3);
+      expect(
+        vi.mocked(buildAgentSessionCommand).mock.calls.map(([args]) => args.isResuming)
+      ).toEqual([false, true, false]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
-      expect(spawnLocalPty).toHaveBeenCalledTimes(2);
+  it('starts an SSH conversation fresh after one resume replacement exits', async () => {
+    vi.useFakeTimers();
+    try {
+      const exitHandlers: Array<Array<(info: PtyExitInfo) => void>> = [];
+      openSsh2Pty.mockImplementation(() => {
+        const handlers: Array<(info: PtyExitInfo) => void> = [];
+        exitHandlers.push(handlers);
+        return Promise.resolve({ success: true, data: fakePty(handlers) });
+      });
+      const provider = sshProvider();
+      const item = conversation();
+
+      await provider.startSession(item);
+
+      for (let index = 0; index < 2; index += 1) {
+        for (const handler of exitHandlers[index] ?? []) handler({ exitCode: 1 });
+        await vi.advanceTimersByTimeAsync(500);
+      }
+
+      expect(openSsh2Pty).toHaveBeenCalledTimes(3);
+      expect(
+        vi.mocked(buildAgentSessionCommand).mock.calls.map(([args]) => args.isResuming)
+      ).toEqual([false, true, false]);
     } finally {
       vi.useRealTimers();
     }
@@ -486,6 +689,41 @@ describe('conversation provider respawn state', () => {
           taskId: item.taskId,
         })
       );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('resets SSH supervisor state after a shell refresh retry also exits missing-command', async () => {
+    vi.useFakeTimers();
+    try {
+      const exitHandlers: Array<Array<(info: PtyExitInfo) => void>> = [];
+      openSsh2Pty.mockImplementation(() => {
+        const handlers: Array<(info: PtyExitInfo) => void> = [];
+        exitHandlers.push(handlers);
+        return Promise.resolve({ success: true, data: fakePty(handlers) });
+      });
+      const proxy = {
+        getRemoteShellProfile: vi.fn(async () => ({})),
+        refreshRemoteShellProfile: vi.fn(async () => ({})),
+      };
+      const provider = sshProvider(proxy);
+      const item = conversation();
+
+      await provider.startSession(item, undefined, true);
+      for (const handler of exitHandlers[0] ?? []) handler({ exitCode: 127 });
+      await vi.advanceTimersByTimeAsync(500);
+      for (const handler of exitHandlers[1] ?? []) handler({ exitCode: 127 });
+
+      await provider.startSession(item);
+      for (const handler of exitHandlers[2] ?? []) handler({ exitCode: 0 });
+      await vi.advanceTimersByTimeAsync(500);
+
+      expect(proxy.refreshRemoteShellProfile).toHaveBeenCalledTimes(1);
+      expect(openSsh2Pty).toHaveBeenCalledTimes(4);
+      expect(
+        vi.mocked(buildAgentSessionCommand).mock.calls.map(([args]) => args.isResuming)
+      ).toEqual([true, false, false, true]);
     } finally {
       vi.useRealTimers();
     }

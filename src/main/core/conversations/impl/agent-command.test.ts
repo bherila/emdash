@@ -1,3 +1,4 @@
+import * as toml from 'smol-toml';
 import { describe, expect, it } from 'vitest';
 import { providerConfigDefaults } from '@main/core/settings/schema';
 import type { AgentProviderId } from '@shared/agent-provider-registry';
@@ -31,8 +32,59 @@ describe('buildAgentCommand', () => {
 
     expect(command).toEqual({
       command: 'codex',
-      args: ['--dangerously-bypass-approvals-and-sandbox', 'Fix the issue'],
+      args: [
+        '-c',
+        'approval_policy=never',
+        '-c',
+        'sandbox_mode=danger-full-access',
+        '--dangerously-bypass-hook-trust',
+        'Fix the issue',
+      ],
     });
+  });
+
+  it('does not duplicate auto-approve flags already present in default args', () => {
+    const command = buildAgentCommand({
+      providerId: 'codex',
+      providerConfig: {
+        ...providerConfigDefaults.codex,
+        defaultArgs: ['--dangerously-bypass-approvals-and-sandbox'],
+      },
+      autoApprove: true,
+      initialPrompt: 'Fix the issue',
+      sessionId: 'session-1',
+    });
+
+    expect(command.args).toEqual([
+      '--dangerously-bypass-approvals-and-sandbox',
+      '-c',
+      'approval_policy=never',
+      '-c',
+      'sandbox_mode=danger-full-access',
+      '--dangerously-bypass-hook-trust',
+      'Fix the issue',
+    ]);
+  });
+
+  it('dedupes Codex singleton approval bypass flag across all configured args', () => {
+    const command = buildAgentCommand({
+      providerId: 'codex',
+      providerConfig: {
+        ...providerConfigDefaults.codex,
+        cli: 'codex --dangerously-bypass-approvals-and-sandbox',
+        defaultArgs: ['--dangerously-bypass-approvals-and-sandbox'],
+        extraArgs: '--dangerously-bypass-approvals-and-sandbox',
+      },
+      autoApprove: true,
+      initialPrompt: 'Fix the issue',
+      sessionId: 'session-1',
+    });
+
+    expect(
+      command.args.filter((arg) => arg === '--dangerously-bypass-approvals-and-sandbox')
+    ).toHaveLength(1);
+    expect(command.args).toContain('--dangerously-bypass-hook-trust');
+    expect(command.args).toContain('Fix the issue');
   });
 
   it('resumes Codex by stored provider session id when available', () => {
@@ -101,6 +153,135 @@ describe('buildAgentCommand', () => {
       command: 'agy',
       args: ['--conversation=session-1', '--dangerously-skip-permissions', '-i', 'Fix the issue'],
     });
+  });
+
+  it.each<{
+    providerId: AgentProviderId;
+    expectedArgs: string[];
+  }>([
+    {
+      providerId: 'cursor',
+      expectedArgs: ['-f', '--approve-mcps', 'Fix the issue'],
+    },
+    {
+      providerId: 'gemini',
+      expectedArgs: ['--approval-mode=yolo', '--skip-trust', '-i', 'Fix the issue'],
+    },
+    {
+      providerId: 'copilot',
+      expectedArgs: ['--allow-all-tools', '-i', 'Fix the issue'],
+    },
+    {
+      providerId: 'mistral',
+      expectedArgs: ['--agent', 'auto-approve', 'Fix the issue'],
+    },
+  ])('uses automation-safe auto-approve args for $providerId', ({ providerId, expectedArgs }) => {
+    const command = buildAgentCommand({
+      providerId,
+      providerConfig: providerConfigDefaults[providerId],
+      autoApprove: true,
+      initialPrompt: 'Fix the issue',
+      sessionId: 'session-1',
+    });
+
+    expect(command.args).toEqual(expectedArgs);
+  });
+
+  it('does not pass Kimi auto-approve args when resuming', () => {
+    const command = buildAgentCommand({
+      providerId: 'kimi',
+      providerConfig: providerConfigDefaults.kimi,
+      autoApprove: true,
+      sessionId: 'session-1',
+      isResuming: true,
+    });
+
+    expect(command.args).toEqual(['-C']);
+  });
+
+  it('resumes Kimi by stored provider session id when available', () => {
+    const command = buildAgentCommand({
+      providerId: 'kimi',
+      providerConfig: providerConfigDefaults.kimi,
+      autoApprove: true,
+      sessionId: 'conv-1',
+      providerSessionId: 'ses_kimi_1',
+      isResuming: true,
+    });
+
+    expect(command.args).toEqual(['-S', 'ses_kimi_1']);
+  });
+
+  it('injects Kimi hooks into inline TOML --config args', () => {
+    const command = buildAgentCommand({
+      providerId: 'kimi',
+      providerConfig: {
+        ...providerConfigDefaults.kimi,
+        defaultArgs: [
+          '--config',
+          toml.stringify({
+            default_model: 'openrouter-glm',
+            models: {
+              'openrouter-glm': { provider: 'openrouter', model: 'glm', max_context_size: 1 },
+            },
+            providers: {
+              openrouter: { type: 'openai_legacy', base_url: 'https://example.com', api_key: '' },
+            },
+          }),
+        ],
+      },
+      sessionId: 'session-1',
+    });
+
+    const config = toml.parse(command.args[1]) as Record<string, unknown>;
+    const hooks = config.hooks as Record<string, string>[];
+    expect(command.args[0]).toBe('--config');
+    expect(hooks.find((hook) => hook.event === 'UserPromptSubmit')?.command).toContain(
+      'X-Emdash-Event-Type: start'
+    );
+    expect(hooks.find((hook) => hook.event === 'Stop')?.command).toContain(
+      'X-Emdash-Event-Type: stop'
+    );
+  });
+
+  it('injects Kimi hooks into inline JSON --config args', () => {
+    const command = buildAgentCommand({
+      providerId: 'kimi',
+      providerConfig: {
+        ...providerConfigDefaults.kimi,
+        defaultArgs: [
+          `--config=${JSON.stringify({
+            default_model: 'openrouter-glm',
+            models: {
+              'openrouter-glm': { provider: 'openrouter', model: 'glm', max_context_size: 1 },
+            },
+            providers: {
+              openrouter: { type: 'openai_legacy', base_url: 'https://example.com', api_key: '' },
+            },
+          })}`,
+        ],
+      },
+      sessionId: 'session-1',
+    });
+
+    const config = JSON.parse(command.args[0].slice('--config='.length)) as Record<string, unknown>;
+    const hooks = config.hooks as Record<string, string>[];
+    expect(hooks.find((hook) => hook.event === 'SessionStart')?.command).toContain(
+      'X-Emdash-Event-Type: session'
+    );
+  });
+
+  it('leaves invalid Kimi inline --config args unchanged', () => {
+    const command = buildAgentCommand({
+      providerId: 'kimi',
+      providerConfig: {
+        ...providerConfigDefaults.kimi,
+        defaultArgs: ['--config', 'not valid toml = {'],
+      },
+      sessionId: 'session-1',
+    });
+
+    expect(command.args).toEqual(['--config', 'not valid toml = {']);
   });
 
   it('supports custom CLI command prefixes and appends managed provider args', () => {
@@ -260,7 +441,7 @@ describe('buildAgentCommand', () => {
       freshArgs: ['run', '-s', '-t', 'Fix the bug'],
       resumeArgs: ['run', '-s', '--resume'],
     },
-    { providerId: 'kimi', freshArgs: ['-c', 'Fix the bug'], resumeArgs: ['--continue'] },
+    { providerId: 'kimi', freshArgs: [], resumeArgs: ['-C'] },
     { providerId: 'codebuff', freshArgs: ['Fix the bug'], resumeArgs: [] },
     { providerId: 'freebuff', freshArgs: ['Fix the bug'], resumeArgs: [] },
     { providerId: 'mistral', freshArgs: ['Fix the bug'], resumeArgs: [] },
@@ -286,6 +467,30 @@ describe('buildAgentCommand', () => {
 
     expect(fresh.args).toEqual(freshArgs);
     expect(resume.args).toEqual(resumeArgs);
+  });
+
+  it('resumes OpenCode by stored provider session id when available', () => {
+    const result = buildAgentCommand({
+      providerId: 'opencode',
+      providerConfig: providerConfigDefaults.opencode,
+      sessionId: 'conv-1',
+      providerSessionId: 'ses_7e7cTuaNc1DpuMrZrpUv4WRk0Z',
+      isResuming: true,
+    });
+
+    expect(result.args).toEqual(['--session', 'ses_7e7cTuaNc1DpuMrZrpUv4WRk0Z']);
+  });
+
+  it('falls back to last OpenCode session when the stored provider session id is invalid', () => {
+    const result = buildAgentCommand({
+      providerId: 'opencode',
+      providerConfig: providerConfigDefaults.opencode,
+      sessionId: 'conv-1',
+      providerSessionId: 'msg_e8cbf36c300143krNXzZNt6AfZ',
+      isResuming: true,
+    });
+
+    expect(result.args).toEqual(['--continue']);
   });
 
   it('appends extra args', () => {
@@ -316,6 +521,18 @@ describe('buildAgentCommand', () => {
     });
 
     expect(result).toEqual({ command: 'copilot', args: ['Fix the bug'] });
+  });
+
+  it('resumes Copilot by stored provider session id when available', () => {
+    const result = buildAgentCommand({
+      providerId: 'copilot',
+      providerConfig: providerConfigDefaults.copilot,
+      sessionId: 'conv-1',
+      providerSessionId: 'copilot-session-1',
+      isResuming: true,
+    });
+
+    expect(result.args).toEqual(['--resume', 'copilot-session-1']);
   });
 
   it('rejects shell control syntax that makes managed args ambiguous', () => {

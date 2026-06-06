@@ -16,7 +16,12 @@ import {
   useWorkspaceId,
   useWorkspaceViewModel,
 } from '@renderer/features/tasks/task-view-context';
-import { getDraggedFilePaths, hasDraggedFiles } from '@renderer/lib/drag-files';
+import {
+  clearDraggedWorkspaceFile,
+  getDraggedFilePaths,
+  hasDraggedFiles,
+  setDraggedWorkspaceFile,
+} from '@renderer/lib/drag-files';
 import { FileIcon } from '@renderer/lib/editor/file-icon';
 import { toast } from '@renderer/lib/hooks/use-toast';
 import { rpc } from '@renderer/lib/ipc';
@@ -75,9 +80,15 @@ async function importLocalFiles(args: {
   );
 
   try {
-    const result = await rpc.fs.copyLocalFiles(projectId, workspaceId, srcPaths, destDirPath, {
-      overwrite,
-    });
+    const result = await rpc.workspace.fs.copyLocalFiles(
+      projectId,
+      workspaceId,
+      srcPaths,
+      destDirPath,
+      {
+        overwrite,
+      }
+    );
     if (!result.success) throw new Error(resultErrorMessage(result.error));
   } catch (error) {
     for (const p of inserted) files.removeNode(p);
@@ -186,7 +197,12 @@ const FileTreeRow = observer(function FileTreeRow({
     if (node.type !== 'file') return;
 
     try {
-      const result = await rpc.fs.readFile(projectId, workspaceId, node.path, MAX_COPY_FILE_BYTES);
+      const result = await rpc.workspace.fs.readFile(
+        projectId,
+        workspaceId,
+        node.path,
+        MAX_COPY_FILE_BYTES
+      );
       if (!result.success) throw new Error(resultErrorMessage(result.error));
       if (result.data.truncated) throw new Error('File is too large to copy.');
       await rpc.app.clipboardWriteText(result.data.content);
@@ -202,7 +218,7 @@ const FileTreeRow = observer(function FileTreeRow({
 
   const copyPath = async () => {
     try {
-      const result = await rpc.fs.getAbsolutePath(projectId, workspaceId, node.path);
+      const result = await rpc.workspace.fs.getAbsolutePath(projectId, workspaceId, node.path);
       if (!result.success) throw new Error(resultErrorMessage(result.error));
       await rpc.app.clipboardWriteText(result.data.path);
       toast({ title: 'Path copied' });
@@ -229,6 +245,17 @@ const FileTreeRow = observer(function FileTreeRow({
   };
 
   const [isDropTarget, setIsDropTarget] = useState(false);
+
+  const handleDragStart = (event: React.DragEvent) => {
+    // Carry the path in the workspace environment so drop targets can inject it
+    // without knowing which workspace rendered the file tree.
+    setDraggedWorkspaceFile(event.dataTransfer, {
+      workspaceId,
+      workspaceRootPath: workspace.path,
+      relPath: node.path,
+      targetPlatform: workspace.sshConnectionId ? 'linux' : undefined,
+    });
+  };
 
   const handleDragOver = (event: React.DragEvent) => {
     if (!hasDraggedFiles(event.dataTransfer)) return;
@@ -284,9 +311,12 @@ const FileTreeRow = observer(function FileTreeRow({
           isHidden && 'opacity-60'
         )}
         tabIndex={0}
+        draggable
         onClick={handleClick}
         onDoubleClick={handleDoubleClick}
         onKeyDown={handleKeyDown}
+        onDragStart={handleDragStart}
+        onDragEnd={clearDraggedWorkspaceFile}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}

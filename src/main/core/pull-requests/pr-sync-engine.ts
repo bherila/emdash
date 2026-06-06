@@ -31,12 +31,18 @@ import type {
   PullRequest,
   PullRequestComment,
   PullRequestFile,
+  PullRequestMergeOptions,
   PullRequestStatus,
   PullRequestUser,
 } from '@shared/pull-requests';
 import { parseRepositoryRef, parseRepositoryRefResult } from '@shared/repository-ref';
 import { err, ok, type Result } from '@shared/result';
-import { prSyncEngineErrorMessage, toPrApiError, type PrSyncEngineError } from './pr-sync-errors';
+import {
+  isPrSyncHostUnreachable,
+  prSyncEngineErrorMessage,
+  toPrApiError,
+  type PrSyncEngineError,
+} from './pr-sync-errors';
 import { assemblePullRequest } from './pr-utils';
 
 const PR_SYNC_MAX_COUNT = 300;
@@ -192,6 +198,16 @@ export class PrSyncEngine {
       })
       .catch((e: unknown) => {
         if ((e as { name?: string }).name !== 'AbortError') {
+          const repository = parseRepositoryRef(repositoryUrl);
+          const error = toPrApiError(e, 'Unable to sync pull requests', repository?.host);
+          if (isPrSyncHostUnreachable(error)) {
+            log.warn('PrSyncEngine: sync skipped; GitHub host unreachable', {
+              repositoryUrl,
+              host: error.host,
+              error: error.reason,
+            });
+            return;
+          }
           log.error('PrSyncEngine: sync failed', { repositoryUrl, error: String(e) });
         }
       })
@@ -327,7 +343,8 @@ export class PrSyncEngine {
         const batch: GqlPrNode[] = nodes.slice();
 
         if (batch.length > 0) {
-          await this._upsertBatch(repositoryUrl, batch);
+          const upserted = await this._upsertBatch(repositoryUrl, batch);
+          this._notifyPrsUpdated(upserted);
           synced += batch.length;
         }
 
@@ -464,7 +481,8 @@ export class PrSyncEngine {
         }
 
         if (batch.length > 0) {
-          await this._upsertBatch(repositoryUrl, batch);
+          const upserted = await this._upsertBatch(repositoryUrl, batch);
+          this._notifyPrsUpdated(upserted);
           synced += batch.length;
           lastUpdatedAt = batch[0].updatedAt; // most recent first
         }
@@ -1045,6 +1063,11 @@ export class PrSyncEngine {
     events.emit(prUpdatedChannel, { prs: [pr] });
   }
 
+  private _notifyPrsUpdated(prs: PullRequest[]): void {
+    if (prs.length === 0) return;
+    events.emit(prUpdatedChannel, { prs });
+  }
+
   private _emitProgress(progress: PrSyncProgress): void {
     events.emit(prSyncProgressChannel, progress);
   }
@@ -1085,7 +1108,7 @@ export class PrSyncEngine {
   async mergePullRequest(
     repositoryUrl: string,
     prNumber: number,
-    options: { strategy: 'merge' | 'squash' | 'rebase'; commitHeadOid?: string }
+    options: PullRequestMergeOptions
   ): Promise<Result<{ sha: string | null; merged: boolean }, PrSyncEngineError>> {
     const repository = parseRepositoryRefResult(repositoryUrl);
     if (!repository.success) return err(repository.error);
@@ -1093,6 +1116,9 @@ export class PrSyncEngine {
     const octokit = await this.getOctokit(repository.data.host);
     if (!octokit.success) return err(octokit.error);
     try {
+      // GitHub exposes bypassing branch protection/rulesets through the caller's permissions,
+      // not a REST merge parameter. `bypassRequirements` is captured by the UI/telemetry path;
+      // the merge request itself remains identical and GitHub accepts or rejects it server-side.
       const response = await octokit.data.rest.pulls.merge({
         owner,
         repo,

@@ -1,7 +1,8 @@
-import { createRPCRouter } from '../shared/ipc/rpc';
+import { createRPCNamespace, createRPCRouter } from '../shared/ipc/rpc';
 import { accountController } from './core/account/controller';
 import { appController } from './core/app/controller';
 import { asanaController } from './core/asana/controller';
+import { automationsController } from './core/automations/controller';
 import { conversationController } from './core/conversations/controller';
 import { dependenciesController } from './core/dependencies/controller';
 import { editorBufferController } from './core/editor/controller';
@@ -15,6 +16,7 @@ import { issueController } from './core/issues/controller';
 import { jiraController } from './core/jira/controller';
 import { linearController } from './core/linear/controller';
 import { mcpController } from './core/mcp/controller';
+import { mondayController } from './core/monday/controller';
 import { plainController } from './core/plain/controller';
 import { projectController } from './core/projects/controller';
 import { promptLibraryController } from './core/prompt-library/controller';
@@ -30,9 +32,9 @@ import { sshController } from './core/ssh/controller';
 import { taskController } from './core/tasks/controller';
 import { telemetryController } from './core/telemetry/controller';
 import { terminalsController } from './core/terminals/controller';
+import { trelloController } from './core/trello/controller';
 import { updateController } from './core/updates/controller';
 import { viewStateController } from './core/view-state/controller';
-import { workspaceController } from './core/workspaces/controller';
 import { projectSettingsController } from './core/workspaces/project-settings-controller';
 import { legacyPortController } from './db/legacy-port/controller';
 
@@ -40,10 +42,10 @@ export const rpcRouter = createRPCRouter({
   account: accountController,
   legacyPort: legacyPortController,
   app: appController,
+  automations: automationsController,
   appSettings: appSettingsController,
   providerSettings: providerSettingsController,
   repository: repositoryController,
-  fs: filesController,
   update: updateController,
   pty: ptyController,
   resourceMonitor: resourceMonitorController,
@@ -55,7 +57,9 @@ export const rpcRouter = createRPCRouter({
   issues: issueController,
   jira: jiraController,
   linear: linearController,
+  monday: mondayController,
   plain: plainController,
+  trello: trelloController,
   promptLibrary: promptLibraryController,
   skills: skillsController,
   ssh: sshController,
@@ -63,16 +67,18 @@ export const rpcRouter = createRPCRouter({
   tasks: taskController,
   conversations: conversationController,
   terminals: terminalsController,
-  git: gitController,
   dependencies: dependenciesController,
   mcp: mcpController,
-  editorBuffer: editorBufferController,
   telemetry: telemetryController,
   pullRequests: pullRequestController,
   viewState: viewStateController,
   search: searchController,
-  workspaces: workspaceController,
   projectSettings: projectSettingsController,
+  workspace: createRPCNamespace({
+    git: gitController,
+    fs: filesController,
+    editor: editorBufferController,
+  }),
 });
 
 export type RpcRouter = typeof rpcRouter;

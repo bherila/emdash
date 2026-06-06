@@ -44,6 +44,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@renderer/lib/ui/toolti
 import { formatDiffLineCount } from '@renderer/utils/format-diff-line-count';
 import { cn } from '@renderer/utils/utils';
 import type { Issue } from '@shared/tasks';
+import { AutomationRunPill } from './components/automation-run-pill';
 import { DevServerPills } from './components/dev-server-pills';
 import { IssueSelector, ProviderLogo } from './components/issue-selector/issue-selector';
 import { type SidebarTab } from './types';
@@ -169,14 +170,6 @@ const ActiveTaskTitlebar = observer(function ActiveTaskTitlebar({
                   <GitBranch className="size-3.5" />
                   <span>{workspace.git.branchName}</span>
                 </span>
-                {taskPayload.sourceBranch && (
-                  <span className="flex items-center gap-2 text-foreground-passive">
-                    Created from
-                    <span className="flex items-center gap-1 text-foreground-muted">
-                      <GitBranch className="size-3.5" /> {taskPayload.sourceBranch.branch}
-                    </span>
-                  </span>
-                )}
                 <div className="flex w-full items-center gap-1">
                   {hasUpstream ? (
                     <>
@@ -292,26 +285,40 @@ const ActiveTaskTitlebar = observer(function ActiveTaskTitlebar({
             </PopoverContent>
           </Popover>
           {taskPayload.linkedIssue ? <LinkedIssueBadge issue={taskPayload.linkedIssue} /> : null}
-          <button
-            className={cn(
-              'text-foreground-muted ml-1',
-              taskPayload.isPinned && 'text-muted-foreground'
-            )}
-            onClick={() => taskStore.setPinned(!taskPayload.isPinned)}
-          >
-            <Pin
-              className={cn('size-3.5', taskPayload.isPinned && 'text-foreground-muted')}
-              fill={taskPayload.isPinned ? 'currentColor' : 'none'}
+          {taskPayload.type === 'task' && (
+            <button
+              className={cn(
+                'text-foreground-muted ml-1',
+                taskPayload.isPinned && 'text-muted-foreground'
+              )}
+              onClick={() => taskStore.setPinned(!taskPayload.isPinned)}
+            >
+              <Pin
+                className={cn('size-3.5', taskPayload.isPinned && 'text-foreground-muted')}
+                fill={taskPayload.isPinned ? 'currentColor' : 'none'}
+              />
+            </button>
+          )}
+          {taskPayload.automationRunId && (
+            <AutomationRunPill
+              runId={taskPayload.automationRunId}
+              projectId={projectId}
+              taskStore={taskStore}
+              isConverted={taskPayload.type === 'task'}
             />
-          </button>
+          )}
         </div>
       }
       rightSlot={
         <div className="flex items-center gap-2">
           <DevServerPills projectId={projectId} taskId={taskId} />
-          {!isRemoteProject && (
-            <OpenInMenu path={workspace.path} className="h-7 bg-transparent" borderless />
-          )}
+          <OpenInMenu
+            path={workspace.path}
+            className="h-7 bg-transparent"
+            borderless
+            isRemote={isRemoteProject}
+            sshConnectionId={workspace.sshConnectionId}
+          />
           <Separator orientation="vertical" className="h-5 self-center!" />
           <Tooltip>
             <TooltipTrigger>

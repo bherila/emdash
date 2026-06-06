@@ -1,32 +1,33 @@
 import { telemetryService } from '@main/lib/telemetry';
-import { taskManager } from '../tasks/task-manager';
 import { taskService } from '../tasks/task-service';
+import { taskSessionManager } from '../tasks/task-session-manager';
 
 taskService.on('task:created', (task, params) => {
-  const { strategy } = params;
+  const { git } = params.workspaceConfig;
+  const { linkedIssue, initialConversation } = params.taskConfig;
   const taskCreatedStrategy = (() => {
-    if (strategy.kind === 'from-pull-request') return 'pr';
-    if (params.linkedIssue) return 'issue';
-    if (strategy.kind === 'no-worktree') return 'blank';
+    if (git.kind === 'pr-branch') return 'pr';
+    if (linkedIssue) return 'issue';
+    if (git.kind === 'none') return 'blank';
     return 'branch';
   })();
   telemetryService.capture('task_created', {
     strategy: taskCreatedStrategy,
-    has_initial_prompt: Boolean(params.initialConversation?.initialPrompt?.trim()),
-    has_issue: params.linkedIssue?.provider ?? 'none',
-    provider: params.initialConversation?.provider ?? null,
+    has_initial_prompt: Boolean(initialConversation?.initialPrompt?.trim()),
+    has_issue: linkedIssue?.provider ?? 'none',
+    provider: initialConversation?.provider ?? null,
     project_id: task.projectId,
     task_id: task.id,
   });
-  if (params.linkedIssue) {
+  if (linkedIssue) {
     telemetryService.capture('issue_linked_to_task', {
-      provider: params.linkedIssue.provider,
+      provider: linkedIssue.provider,
       project_id: task.projectId,
       task_id: task.id,
     });
   }
 });
 
-taskManager.hooks.on('task:provisioned', ({ projectId, taskId }) => {
+taskSessionManager.hooks.on('task:provisioned', ({ projectId, taskId }) => {
   telemetryService.capture('task_provisioned', { project_id: projectId, task_id: taskId });
 });

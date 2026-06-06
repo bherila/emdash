@@ -40,6 +40,7 @@ function createAppDb(): {
       workspace_provider TEXT NOT NULL DEFAULT 'local',
       base_ref TEXT,
       ssh_connection_id TEXT,
+      repository_workspace_id TEXT,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
@@ -60,7 +61,10 @@ function createAppDb(): {
       is_pinned INTEGER NOT NULL DEFAULT 0,
       workspace_provider TEXT,
       workspace_id TEXT,
-      workspace_provider_data TEXT
+      workspace_provider_data TEXT,
+      workspace_intent TEXT,
+      type TEXT NOT NULL DEFAULT 'task',
+      automation_run_id TEXT
     );
 
     CREATE TABLE conversations (
@@ -73,7 +77,8 @@ function createAppDb(): {
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       last_interacted_at TEXT,
-      is_initial_conversation INTEGER
+      is_initial_conversation INTEGER,
+      session_id TEXT
     );
   `);
 

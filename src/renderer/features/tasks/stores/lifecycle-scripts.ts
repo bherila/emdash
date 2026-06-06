@@ -38,12 +38,16 @@ export class LifecycleScriptStore {
 
   constructor(data: LifecycleScriptData, projectId: string, workspaceId: string) {
     this.data = data;
-    this.session = new PtySession(makePtySessionId(projectId, workspaceId, data.id), () =>
-      rpc.terminals.prepareLifecycleScript({
-        projectId,
-        workspaceId,
-        type: data.type,
-      })
+    this.session = new PtySession(
+      makePtySessionId(projectId, workspaceId, data.id),
+      () =>
+        rpc.terminals.prepareLifecycleScript({
+          projectId,
+          workspaceId,
+          type: data.type,
+        }),
+      undefined,
+      undefined
     );
     this.offStatus = events.on(lifecycleScriptStatusChannel, (event) => {
       if (
@@ -184,9 +188,14 @@ export class LifecycleScriptsStore implements TabViewProvider<LifecycleScriptSto
   private async watchConfig(): Promise<void> {
     if (this._watchingConfig || this._disposed) return;
     try {
-      await rpc.fs.watchSetPaths(this.projectId, this.workspaceId, [''], 'lifecycle-scripts');
+      await rpc.workspace.fs.watchSetPaths(
+        this.projectId,
+        this.workspaceId,
+        [''],
+        'lifecycle-scripts'
+      );
       if (this._disposed) {
-        void rpc.fs.watchStop(this.projectId, this.workspaceId, 'lifecycle-scripts');
+        void rpc.workspace.fs.watchStop(this.projectId, this.workspaceId, 'lifecycle-scripts');
         return;
       }
       this._watchingConfig = true;
@@ -256,7 +265,7 @@ export class LifecycleScriptsStore implements TabViewProvider<LifecycleScriptSto
     this._refreshSeq++;
     for (const unsubscribe of this._unsubscribes) unsubscribe();
     if (this._watchingConfig) {
-      void rpc.fs.watchStop(this.projectId, this.workspaceId, 'lifecycle-scripts');
+      void rpc.workspace.fs.watchStop(this.projectId, this.workspaceId, 'lifecycle-scripts');
     }
     for (const script of this.scripts.values()) {
       script.dispose();

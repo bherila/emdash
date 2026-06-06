@@ -11,6 +11,7 @@ import { providerTokenRegistry } from './core/account/provider-token-registry';
 import { emdashAccountService } from './core/account/services/emdash-account-service';
 import { agentHookService } from './core/agent-hooks/agent-hook-service';
 import { appService } from './core/app/service';
+import { automationsService } from './core/automations/automations-service';
 import { localDependencyManager } from './core/dependencies/dependency-manager';
 import { editorBufferService } from './core/editor/editor-buffer-service';
 import { gitWatcherRegistry } from './core/git/git-watcher-registry';
@@ -125,6 +126,7 @@ void app.whenReady().then(async () => {
   gitWatcherRegistry.initialize();
   projectSettingsService.initialize();
   prSyncScheduler.initialize();
+  automationsService.start();
   appService.initialize();
   await appSettingsService.initialize();
   await promptLibraryService.initialize();
@@ -166,6 +168,7 @@ app.on('before-quit', (event) => {
   event.preventDefault();
   telemetryService.capture('app_closed');
   void telemetryService.dispose().finally(() => {
+    automationsService.stop();
     agentHookService.dispose();
     stopResourceSampler();
     updateService.dispose();

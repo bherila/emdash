@@ -52,7 +52,10 @@ jobs:
         run: |
           set -euo pipefail
           gh release delete "$TAG" --cleanup-tag -y 2>/dev/null || true
-          mapfile -t assets < <(find release -maxdepth 1 -type f | sort)
+          assets=()
+          while IFS= read -r asset; do
+            assets+=("$asset")
+          done < <(find release -maxdepth 1 -type f | sort)
           if [ "${#assets[@]}" -eq 0 ]; then
             echo "No release assets found" >&2
             exit 1
